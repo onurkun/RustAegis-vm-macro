@@ -1,0 +1,22 @@
+[package]
+name = "aegis_vm_macro"
+version = "0.1.0"
+edition = "2021"
+description = "Proc-macro for VM-protected functions - RustAegis"
+license = "MIT"
+repository = "https://github.com/onurkun/RustAegis-vm-macro"
+keywords = ["obfuscation", "virtualization", "security", "compiler", "macro"]
+categories = ["cryptography", "development-tools::procedural-macro-helpers"]
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
+sha2 = "0.10"
+hmac = "0.12"
+aes-gcm = "0.10"
+hex = "0.4"
