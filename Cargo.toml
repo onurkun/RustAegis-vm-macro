@@ -1,6 +1,6 @@
 [package]
 name = "aegis_vm_macro"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Proc-macro for VM-protected functions - RustAegis"
 license = "MIT"
