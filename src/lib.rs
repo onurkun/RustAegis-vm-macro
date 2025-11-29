@@ -20,10 +20,12 @@ use syn::{parse_macro_input, ItemFn, ReturnType, FnArg, Pat, Type};
 mod anti_analysis;
 mod compiler;
 mod crypto;
+mod integrity;
 mod mba;
 mod opcodes;
 mod polymorphic;
 mod substitution;
+mod value_cryptor;
 
 /// Protection level for VM-protected functions
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -192,11 +194,44 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             };
 
+            // Compute integrity hash for the plaintext bytecode
+            // This will be verified after decryption at runtime
+            let integrity_hash = integrity::fnv1a_hash_with_seed(&bytecode);
+
             let ciphertext_len = package.ciphertext.len();
             let ciphertext_bytes = package.ciphertext.iter().map(|b| quote! { #b });
             let nonce_bytes = package.nonce.iter().map(|b| quote! { #b });
             let tag_bytes = package.tag.iter().map(|b| quote! { #b });
             let build_id = package.build_id;
+
+            // For Paranoid level, also compute region hashes for detailed tampering detection
+            let region_check = if protection_level == ProtectionLevel::Paranoid {
+                let integrity_data = integrity::IntegrityData::compute_default(&bytecode);
+                let num_regions = integrity_data.regions.len();
+                let region_starts: Vec<_> = integrity_data.regions.iter().map(|r| r.start).collect();
+                let region_ends: Vec<_> = integrity_data.regions.iter().map(|r| r.end).collect();
+                let region_hashes: Vec<_> = integrity_data.regions.iter().map(|r| r.hash).collect();
+
+                quote! {
+                    // Region-based integrity check (Paranoid level)
+                    static REGION_STARTS: [u32; #num_regions] = [#(#region_starts),*];
+                    static REGION_ENDS: [u32; #num_regions] = [#(#region_ends),*];
+                    static REGION_HASHES: [u64; #num_regions] = [#(#region_hashes),*];
+
+                    // Verify each region
+                    for i in 0..#num_regions {
+                        let start = REGION_STARTS[i] as usize;
+                        let end = REGION_ENDS[i] as usize;
+                        let region_data = &decrypted[start..end];
+                        let computed = aegis_vm::compute_hash(region_data);
+                        if computed != REGION_HASHES[i] {
+                            panic!("VM bytecode tampering detected in region {}", i);
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
 
             quote! {
                 #fn_vis fn #fn_name #fn_generics(#fn_inputs) #fn_output {
@@ -207,6 +242,7 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                     static NONCE: [u8; 12] = [#(#nonce_bytes),*];
                     static TAG: [u8; 16] = [#(#tag_bytes),*];
                     static BUILD_ID: u64 = #build_id;
+                    static INTEGRITY_HASH: u64 = #integrity_hash;
 
                     // Decrypt once and cache
                     static DECRYPTED: OnceLock<Vec<u8>> = OnceLock::new();
@@ -221,8 +257,18 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                         // Create crypto context and decrypt
                         let seed = aegis_vm::build_config::get_build_seed();
                         let ctx = aegis_vm::CryptoContext::new(seed);
-                        ctx.decrypt(&ENCRYPTED, &NONCE, &TAG)
-                            .expect("VM bytecode decryption failed - possible tampering")
+                        let decrypted = ctx.decrypt(&ENCRYPTED, &NONCE, &TAG)
+                            .expect("VM bytecode decryption failed - possible tampering");
+
+                        // Verify integrity hash (quick check)
+                        let computed_hash = aegis_vm::compute_hash(&decrypted);
+                        if computed_hash != INTEGRITY_HASH {
+                            panic!("VM bytecode integrity check failed - tampering detected");
+                        }
+
+                        #region_check
+
+                        decrypted
                     });
 
                     let input_buffer: Vec<u8> = { #input_prep };

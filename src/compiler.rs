@@ -12,6 +12,7 @@ use crate::substitution::{
     AndSubstitution, OrSubstitution, ConstantSubstitution, ZeroSubstitution,
     AddSubstitution, SubSubstitution, DeadCodeInsertion,
 };
+use crate::value_cryptor::ValueCryptor;
 
 /// Compilation error
 #[derive(Debug)]
@@ -69,6 +70,10 @@ pub struct Compiler {
     mba_enabled: bool,
     /// Substitution state (handles RNG and enabled flag)
     subst: Substitution,
+    /// ValueCryptor for constant obfuscation (VMProtect-style)
+    value_cryptor: ValueCryptor,
+    /// Enable heavy value encryption (for Paranoid level)
+    value_cryptor_enabled: bool,
 }
 
 impl Compiler {
@@ -103,6 +108,9 @@ impl Compiler {
             mba: MbaTransformer::new(seed),
             mba_enabled,
             subst: Substitution::new(seed, substitution_enabled),
+            value_cryptor: ValueCryptor::new(seed),
+            // Enable heavy value encryption for Paranoid level (when MBA is enabled)
+            value_cryptor_enabled: mba_enabled,
         }
     }
 
@@ -297,17 +305,23 @@ impl Compiler {
 
     /// Emit a constant value with potential obfuscation
     /// Instead of PUSH X, can do PUSH A, PUSH B, ADD (where A+B=X)
+    /// Or with ValueCryptor: PUSH encrypted_X, <decrypt_chain>
     fn emit_constant(&mut self, value: u64) {
         let table = self.opcode_table.clone();
         let encode = |op: u8| table.encode(op);
-        if ConstantSubstitution::should_split(&mut self.subst, value) {
-            // Split constant: X = A + B where A is random
+
+        // Paranoid level: Use VMProtect-style encryption chain
+        // This provides stronger obfuscation than simple constant splitting
+        if self.value_cryptor_enabled {
+            self.value_cryptor.emit_encrypted_value(value, &mut self.bytecode, &encode);
+        } else if ConstantSubstitution::should_split(&mut self.subst, value) {
+            // Standard level: Split constant: X = A + B where A is random
             let (a, b) = ConstantSubstitution::split(&mut self.subst, value);
             ConstantSubstitution::emit_value(&mut self.bytecode, a, &encode);
             ConstantSubstitution::emit_value(&mut self.bytecode, b, &encode);
             self.emit_add();
         } else {
-            // Standard constant emission
+            // Debug level or small values: Standard constant emission
             ConstantSubstitution::emit_value(&mut self.bytecode, value, &encode);
         }
     }
