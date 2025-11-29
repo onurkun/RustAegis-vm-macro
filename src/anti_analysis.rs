@@ -15,7 +15,10 @@
 //! - Before critical operations (integrity check)
 //! - At function exit (timing verification)
 
-#![allow(dead_code)] // Functions available for future integration
+// Anti-analysis protection - now integrated into vm_protect pipeline
+// Note: Some methods are reserved for future inline check support (requires jump recalculation)
+
+#![allow(dead_code)] // Reserved methods for future inline check support
 
 use crate::opcodes::{special, stack};
 use std::collections::hash_map::DefaultHasher;

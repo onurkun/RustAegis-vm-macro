@@ -123,12 +123,10 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Compile function body to bytecode
     // Use MBA transformations for Paranoid level
+    // Use instruction substitution for Standard and Paranoid levels
     let use_mba = protection_level == ProtectionLevel::Paranoid;
-    let raw_bytecode = if use_mba {
-        compiler::compile_function_with_mba(&input)
-    } else {
-        compiler::compile_function(&input)
-    };
+    let use_substitution = protection_level != ProtectionLevel::Debug;
+    let raw_bytecode = compiler::compile_function_full(&input, use_mba, use_substitution);
 
     let raw_bytecode = match raw_bytecode {
         Ok(bc) => bc,
@@ -146,7 +144,11 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
         ProtectionLevel::Paranoid => polymorphic::PolymorphicLevel::Heavy,
     };
 
-    // Apply polymorphic transformations
+    // Apply polymorphic transformations (junk code, padding)
+    // NOTE: Instruction substitution is now applied at compile time (inside compiler.rs)
+    // so jump offsets are calculated correctly after substitution.
+    // anti_analysis module is still disabled because it adds prefix bytes that break jumps.
+    // TODO: Implement jump offset recalculation to enable anti_analysis checks.
     let fn_name_str = fn_name.to_string();
     let bytecode = polymorphic::apply_polymorphism(&raw_bytecode, &fn_name_str, poly_level);
 

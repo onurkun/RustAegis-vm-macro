@@ -7,6 +7,11 @@ use std::collections::BTreeMap; // Deterministic ordering!
 use crate::opcodes::{stack, arithmetic, control, native, exec};
 use crate::crypto::OpcodeTable;
 use crate::mba::MbaTransformer;
+use crate::substitution::{
+    Substitution, IncSubstitution, DecSubstitution, NotSubstitution,
+    AndSubstitution, OrSubstitution, ConstantSubstitution, ZeroSubstitution,
+    AddSubstitution, SubSubstitution, DeadCodeInsertion,
+};
 
 /// Compilation error
 #[derive(Debug)]
@@ -62,19 +67,27 @@ pub struct Compiler {
     mba: MbaTransformer,
     /// Enable MBA transformations (for Paranoid level)
     mba_enabled: bool,
+    /// Substitution state (handles RNG and enabled flag)
+    subst: Substitution,
 }
 
 impl Compiler {
     /// Create new compiler
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self::with_mba(false)
+        Self::with_options(false, false)
     }
 
     /// Create compiler with MBA transformations enabled
+    #[allow(dead_code)]
     pub fn with_mba(mba_enabled: bool) -> Self {
-        // Use build seed for deterministic MBA
-        let mba_seed = crate::crypto::get_opcode_table().get_seed();
+        Self::with_options(mba_enabled, false)
+    }
+
+    /// Create compiler with full options
+    pub fn with_options(mba_enabled: bool, substitution_enabled: bool) -> Self {
+        // Use build seed for deterministic MBA and substitution
+        let seed = crate::crypto::get_opcode_table().get_seed();
 
         Self {
             bytecode: Vec::new(),
@@ -87,26 +100,36 @@ impl Compiler {
             label_counter: 0,
             loop_stack: Vec::new(),
             opcode_table: crate::crypto::get_opcode_table(),
-            mba: MbaTransformer::new(mba_seed),
+            mba: MbaTransformer::new(seed),
             mba_enabled,
+            subst: Substitution::new(seed, substitution_enabled),
         }
     }
 
     /// Emit an opcode (automatically encoded via shuffle table)
     fn emit_op(&mut self, base_opcode: u8) {
-        // Junk Code Insertion (Obfuscation)
-        // Use bytecode length as a seed for deterministic pseudo-randomness
-        // This ensures reproducible builds while scattering junk code
+        // Dead Code Insertion (deterministic based on bytecode position)
+        // Uses separate entropy source to avoid affecting substitution RNG
+        if self.subst.is_enabled() {
+            let table = self.opcode_table.clone();
+            let encode = |op: u8| table.encode(op);
+            DeadCodeInsertion::emit_deterministic(
+                self.bytecode.len(),
+                &mut self.bytecode,
+                &encode,
+            );
+        }
+
+        // Junk Code Insertion (Simple NOP obfuscation)
         let entropy = (self.bytecode.len() as u64)
             .wrapping_mul(0x5deece66d)
             .wrapping_add(0xb);
-        
+
         // 10% chance to insert a simple NOP
-        // Removing NOP_N logic as it requires inserting padding bytes which complicates things
         if (entropy % 100) < 10 {
             let nop_shuffled = self.opcode_table.encode(crate::opcodes::special::NOP);
             self.bytecode.push(nop_shuffled);
-        } 
+        }
 
         // Emit the actual instruction
         let shuffled = self.opcode_table.encode(base_opcode);
@@ -124,6 +147,7 @@ impl Compiler {
     }
 
     /// Emit a u64 (little-endian)
+    #[allow(dead_code)]
     fn emit_u64(&mut self, value: u64) {
         self.bytecode.extend_from_slice(&value.to_le_bytes());
     }
@@ -132,24 +156,32 @@ impl Compiler {
     // MBA-Aware Arithmetic Emission
     // =========================================================================
 
-    /// Emit ADD instruction, potentially with MBA transformation
+    /// Emit ADD instruction, potentially with MBA transformation or substitution
     fn emit_add(&mut self) {
         if self.mba_enabled {
             // Use MBA transformer to generate obfuscated ADD
             let table = self.opcode_table.clone();
             self.mba.emit_add(&mut self.bytecode, |op| table.encode(op));
         } else {
-            self.emit_op(arithmetic::ADD);
+            // Use advanced substitution: a + b = a - (-b) or ~(~a - b)
+            let table = self.opcode_table.clone();
+            let encode = |op: u8| table.encode(op);
+            let variant = AddSubstitution::choose(&mut self.subst);
+            variant.emit(&mut self.bytecode, &encode);
         }
     }
 
-    /// Emit SUB instruction, potentially with MBA transformation
+    /// Emit SUB instruction, potentially with MBA transformation or substitution
     fn emit_sub(&mut self) {
         if self.mba_enabled {
             let table = self.opcode_table.clone();
             self.mba.emit_sub(&mut self.bytecode, |op| table.encode(op));
         } else {
-            self.emit_op(arithmetic::SUB);
+            // Use advanced substitution: a - b = a + (-b) or ~(~a + b)
+            let table = self.opcode_table.clone();
+            let encode = |op: u8| table.encode(op);
+            let variant = SubSubstitution::choose(&mut self.subst);
+            variant.emit(&mut self.bytecode, &encode);
         }
     }
 
@@ -160,6 +192,138 @@ impl Compiler {
             self.mba.emit_xor(&mut self.bytecode, |op| table.encode(op));
         } else {
             self.emit_op(arithmetic::XOR);
+        }
+    }
+
+    /// Emit INC instruction, potentially with substitution
+    /// INC can be: INC | PUSH 1, ADD | PUSH -1, SUB
+    fn emit_inc(&mut self) {
+        let table = self.opcode_table.clone();
+        let encode = |op: u8| table.encode(op);
+        let variant = IncSubstitution::choose(&mut self.subst);
+        let (needs_add, needs_sub) = variant.emit(&mut self.bytecode, &encode);
+        if needs_add {
+            self.emit_add();
+        } else if needs_sub {
+            self.emit_sub();
+        }
+    }
+
+    /// Emit DEC instruction, potentially with substitution
+    /// DEC can be: DEC | PUSH 1, SUB | PUSH -1, ADD
+    #[allow(dead_code)] // Available for future use (e.g., compound -= operators)
+    fn emit_dec(&mut self) {
+        let table = self.opcode_table.clone();
+        let encode = |op: u8| table.encode(op);
+        let variant = DecSubstitution::choose(&mut self.subst);
+        let (needs_add, needs_sub) = variant.emit(&mut self.bytecode, &encode);
+        if needs_add {
+            self.emit_add();
+        } else if needs_sub {
+            self.emit_sub();
+        }
+    }
+
+    /// Emit NOT instruction, potentially with substitution
+    /// NOT can be: NOT | XOR with 0xFFFFFFFFFFFFFFFF
+    fn emit_not(&mut self) {
+        let table = self.opcode_table.clone();
+        let encode = |op: u8| table.encode(op);
+        let variant = NotSubstitution::choose(&mut self.subst);
+        let needs_xor = variant.emit(&mut self.bytecode, &encode);
+        if needs_xor {
+            self.emit_xor();
+        }
+    }
+
+    /// Emit MUL instruction, potentially with substitution for powers of 2
+    /// Stack: [a, b] -> [a * b]
+    fn emit_mul(&mut self) {
+        // MUL doesn't have simple substitutions without knowing operand values
+        // But we emit it through opcode table for shuffling
+        self.emit_op(arithmetic::MUL);
+    }
+
+    /// Emit SHL instruction
+    /// Stack: [a, shift] -> [a << shift]
+    /// Note: SHL substitution (shift by 1 = a + a) requires constant propagation
+    fn emit_shl(&mut self) {
+        self.emit_op(arithmetic::SHL);
+    }
+
+    /// Emit SHR instruction
+    /// Stack: [a, shift] -> [a >> shift]
+    fn emit_shr(&mut self) {
+        self.emit_op(arithmetic::SHR);
+    }
+
+    /// Emit AND instruction, potentially with substitution
+    /// Stack: [a, b] -> [a & b]
+    fn emit_and(&mut self) {
+        let table = self.opcode_table.clone();
+        let encode = |op: u8| table.encode(op);
+        if AndSubstitution::should_use(&mut self.subst) {
+            // De Morgan: a & b = ~(~a | ~b)
+            // Stack: [a, b]
+            AndSubstitution::emit_demorgan_prefix(&mut self.bytecode, &encode);  // SWAP
+            self.emit_not();  // [~b, a]
+            AndSubstitution::emit_demorgan_swap(&mut self.bytecode, &encode);    // SWAP
+            self.emit_not();  // [~a, ~b]
+            AndSubstitution::emit_demorgan_or(&mut self.bytecode, &encode);      // OR: [~a | ~b]
+            self.emit_not();  // NOT: [~(~a | ~b)] = [a & b]
+        } else {
+            AndSubstitution::emit_original(&mut self.bytecode, &encode);
+        }
+    }
+
+    /// Emit OR instruction, potentially with substitution
+    /// Stack: [a, b] -> [a | b]
+    fn emit_or(&mut self) {
+        let table = self.opcode_table.clone();
+        let encode = |op: u8| table.encode(op);
+        if OrSubstitution::should_use(&mut self.subst) {
+            // De Morgan: a | b = ~(~a & ~b)
+            // Stack: [a, b]
+            OrSubstitution::emit_demorgan_prefix(&mut self.bytecode, &encode);   // SWAP
+            self.emit_not();  // [~b, a]
+            OrSubstitution::emit_demorgan_swap(&mut self.bytecode, &encode);     // SWAP
+            self.emit_not();  // [~a, ~b]
+            OrSubstitution::emit_demorgan_and(&mut self.bytecode, &encode);      // AND: [~a & ~b]
+            self.emit_not();  // NOT: [~(~a & ~b)] = [a | b]
+        } else {
+            OrSubstitution::emit_original(&mut self.bytecode, &encode);
+        }
+    }
+
+    /// Emit a constant value with potential obfuscation
+    /// Instead of PUSH X, can do PUSH A, PUSH B, ADD (where A+B=X)
+    fn emit_constant(&mut self, value: u64) {
+        let table = self.opcode_table.clone();
+        let encode = |op: u8| table.encode(op);
+        if ConstantSubstitution::should_split(&mut self.subst, value) {
+            // Split constant: X = A + B where A is random
+            let (a, b) = ConstantSubstitution::split(&mut self.subst, value);
+            ConstantSubstitution::emit_value(&mut self.bytecode, a, &encode);
+            ConstantSubstitution::emit_value(&mut self.bytecode, b, &encode);
+            self.emit_add();
+        } else {
+            // Standard constant emission
+            ConstantSubstitution::emit_value(&mut self.bytecode, value, &encode);
+        }
+    }
+
+    /// Emit zero with potential obfuscation
+    /// PUSH 0 can be: PUSH X, PUSH X, XOR (x^x=0)
+    fn emit_zero(&mut self) {
+        let table = self.opcode_table.clone();
+        let encode = |op: u8| table.encode(op);
+        if ZeroSubstitution::should_obfuscate(&mut self.subst) {
+            // x ^ x = 0 for any x
+            let x = ZeroSubstitution::get_xor_value(&mut self.subst);
+            ZeroSubstitution::emit_prefix(&mut self.bytecode, x, &encode);
+            self.emit_xor();
+        } else {
+            ZeroSubstitution::emit_original(&mut self.bytecode, &encode);
         }
     }
 
@@ -237,16 +401,18 @@ impl Compiler {
                     let value: u64 = int_lit.base10_parse()
                         .map_err(|e| CompileError(format!("Invalid integer: {}", e)))?;
 
-                    if value <= 255 {
-                        self.emit_op(stack::PUSH_IMM8);
-                        self.emit(value as u8);
+                    // Use constant obfuscation when substitution is enabled
+                    if value == 0 {
+                        self.emit_zero();
                     } else {
-                        self.emit_op(stack::PUSH_IMM);
-                        self.emit_u64(value);
+                        self.emit_constant(value);
                     }
                 } else if let Lit::Bool(bool_lit) = &lit.lit {
-                    self.emit_op(stack::PUSH_IMM8);
-                    self.emit(if bool_lit.value { 1 } else { 0 });
+                    if bool_lit.value {
+                        self.emit_constant(1);
+                    } else {
+                        self.emit_zero();
+                    }
                 } else {
                     return Err(CompileError("Unsupported literal type".to_string()));
                 }
@@ -302,22 +468,22 @@ impl Compiler {
                 self.compile_expr(&binary.right)?;
 
                 // Emit operation based on operator type
-                // Note: ADD, SUB, XOR use MBA-aware emit methods
+                // Note: ADD, SUB, XOR, AND, OR, SHL, SHR use substitution-aware emit methods
                 match binary.op {
                     BinOp::Add(_) => self.emit_add(),
                     BinOp::Sub(_) => self.emit_sub(),
-                    BinOp::Mul(_) => self.emit_op(arithmetic::MUL),
+                    BinOp::Mul(_) => self.emit_mul(),
                     BinOp::BitXor(_) => self.emit_xor(),
-                    BinOp::BitAnd(_) => self.emit_op(arithmetic::AND),
-                    BinOp::BitOr(_) => self.emit_op(arithmetic::OR),
-                    BinOp::Shl(_) => self.emit_op(arithmetic::SHL),
-                    BinOp::Shr(_) => self.emit_op(arithmetic::SHR),
+                    BinOp::BitAnd(_) => self.emit_and(),
+                    BinOp::BitOr(_) => self.emit_or(),
+                    BinOp::Shl(_) => self.emit_shl(),
+                    BinOp::Shr(_) => self.emit_shr(),
                     BinOp::Div(_) => self.emit_op(arithmetic::DIV),
                     BinOp::Rem(_) => self.emit_op(arithmetic::MOD),
                     // Logical AND/OR: Since Rust's && and || only work with bool,
                     // and our comparisons return 0 or 1, bitwise ops work correctly
-                    BinOp::And(_) => self.emit_op(arithmetic::AND),
-                    BinOp::Or(_) => self.emit_op(arithmetic::OR),
+                    BinOp::And(_) => self.emit_and(),
+                    BinOp::Or(_) => self.emit_or(),
                     BinOp::Eq(_) => {
                         // a == b -> (a XOR b) == 0 -> push 1 if zero, else 0
                         self.emit_xor();
@@ -425,14 +591,14 @@ impl Compiler {
                         // Bitwise NOT (flip all bits)
                         // For integers: !x flips all bits
                         // For booleans: !true = false, !false = true (but bool is 0 or 1)
-                        self.emit_op(arithmetic::NOT);
+                        self.emit_not();
                     }
                     UnOp::Neg(_) => {
                         // Arithmetic negation: -x = 0 - x
                         self.emit_op(stack::PUSH_IMM8);
                         self.emit(0);
                         self.emit_op(stack::SWAP);
-                        self.emit_op(arithmetic::SUB);
+                        self.emit_sub();
                     }
                     _ => return Err(CompileError("Unsupported unary operator".to_string())),
                 }
@@ -684,7 +850,7 @@ impl Compiler {
         // Increment: Ri = Ri + 1
         self.emit_op(stack::PUSH_REG);
         self.emit(loop_reg);
-        self.emit_op(arithmetic::INC);
+        self.emit_inc();
         self.emit_op(stack::POP_REG);
         self.emit(loop_reg);
 
@@ -799,18 +965,18 @@ impl Compiler {
         // Compile RHS
         self.compile_expr(value)?;
 
-        // Apply operation (MBA-aware for ADD, SUB, XOR)
+        // Apply operation (substitution-aware for all arithmetic ops)
         match op {
             BinOp::AddAssign(_) => self.emit_add(),
             BinOp::SubAssign(_) => self.emit_sub(),
-            BinOp::MulAssign(_) => self.emit_op(arithmetic::MUL),
+            BinOp::MulAssign(_) => self.emit_mul(),
             BinOp::DivAssign(_) => self.emit_op(arithmetic::DIV),
             BinOp::RemAssign(_) => self.emit_op(arithmetic::MOD),
             BinOp::BitXorAssign(_) => self.emit_xor(),
-            BinOp::BitAndAssign(_) => self.emit_op(arithmetic::AND),
-            BinOp::BitOrAssign(_) => self.emit_op(arithmetic::OR),
-            BinOp::ShlAssign(_) => self.emit_op(arithmetic::SHL),
-            BinOp::ShrAssign(_) => self.emit_op(arithmetic::SHR),
+            BinOp::BitAndAssign(_) => self.emit_and(),
+            BinOp::BitOrAssign(_) => self.emit_or(),
+            BinOp::ShlAssign(_) => self.emit_shl(),
+            BinOp::ShrAssign(_) => self.emit_shr(),
             _ => return Err(CompileError(format!("Unsupported assignment operator: {:?}", op))),
         }
 
@@ -953,19 +1119,33 @@ impl Compiler {
     }
 }
 
-/// Compile a function to bytecode (without MBA)
+/// Compile a function to bytecode (without MBA or substitution)
+#[allow(dead_code)]
 pub fn compile_function(func: &ItemFn) -> Result<Vec<u8>, CompileError> {
-    compile_function_with_options(func, false)
+    compile_function_full(func, false, false)
 }
 
 /// Compile a function to bytecode with MBA transformations
+#[allow(dead_code)]
 pub fn compile_function_with_mba(func: &ItemFn) -> Result<Vec<u8>, CompileError> {
-    compile_function_with_options(func, true)
+    compile_function_full(func, true, false)
+}
+
+/// Compile a function to bytecode with substitution enabled
+#[allow(dead_code)]
+pub fn compile_function_with_substitution(func: &ItemFn) -> Result<Vec<u8>, CompileError> {
+    compile_function_full(func, false, true)
+}
+
+/// Compile a function with full obfuscation (MBA + substitution)
+#[allow(dead_code)]
+pub fn compile_function_with_full_obfuscation(func: &ItemFn) -> Result<Vec<u8>, CompileError> {
+    compile_function_full(func, true, true)
 }
 
 /// Compile a function to bytecode with configurable options
-fn compile_function_with_options(func: &ItemFn, mba_enabled: bool) -> Result<Vec<u8>, CompileError> {
-    let mut compiler = Compiler::with_mba(mba_enabled);
+pub fn compile_function_full(func: &ItemFn, mba_enabled: bool, substitution_enabled: bool) -> Result<Vec<u8>, CompileError> {
+    let mut compiler = Compiler::with_options(mba_enabled, substitution_enabled);
 
     // Register function arguments (deterministic order from syn)
     for arg in &func.sig.inputs {
