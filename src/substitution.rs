@@ -668,12 +668,16 @@ impl DeadCodeInsertion {
                 bytecode.push(encode(stack::DROP));
             }
             1 => {
-                // PUSH X, DUP, XOR, DROP (= push 0, drop)
-                let x = ((entropy >> 16) % 255) as u8 + 1;
+                // PUSH X, PUSH Y, DROP, DROP - two pushes, two drops
+                // NOTE: We avoid XOR here because it modifies CPU flags (Zero Flag)
+                // which would corrupt comparison results before conditional jumps
+                let x = ((entropy >> 16) % 256) as u8;
+                let y = ((entropy >> 24) % 256) as u8;
                 bytecode.push(encode(stack::PUSH_IMM8));
                 bytecode.push(x);
-                bytecode.push(encode(stack::DUP));
-                bytecode.push(encode(arithmetic::XOR));
+                bytecode.push(encode(stack::PUSH_IMM8));
+                bytecode.push(y);
+                bytecode.push(encode(stack::DROP));
                 bytecode.push(encode(stack::DROP));
             }
             _ => {
@@ -709,13 +713,18 @@ impl DeadCodeInsertion {
         bytecode.push(encode(stack::DROP));
     }
 
-    /// PUSH X, PUSH X, XOR, DROP - produces 0 and drops it (ALWAYS SAFE)
+    /// PUSH X, PUSH Y, DROP, DROP - two pushes followed by two drops
+    /// NOTE: We avoid XOR-based patterns here because XOR modifies CPU flags
+    /// (specifically the Zero Flag), which corrupts comparison results when
+    /// dead code is inserted before conditional jumps.
     fn emit_xor_zero<F: Fn(u8) -> u8>(subst: &mut Substitution, bytecode: &mut Vec<u8>, encode: &F) {
-        let x = (subst.next_rand() % 255) as u8 + 1;
+        let x = (subst.next_rand() % 256) as u8;
+        let y = (subst.next_rand() % 256) as u8;
         bytecode.push(encode(stack::PUSH_IMM8));
         bytecode.push(x);
-        bytecode.push(encode(stack::DUP));
-        bytecode.push(encode(arithmetic::XOR));
+        bytecode.push(encode(stack::PUSH_IMM8));
+        bytecode.push(y);
+        bytecode.push(encode(stack::DROP));
         bytecode.push(encode(stack::DROP));
     }
 
