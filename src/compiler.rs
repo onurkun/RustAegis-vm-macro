@@ -50,7 +50,7 @@ pub struct Compiler {
     arg_offsets: BTreeMap<String, usize>,
     /// Local variable name -> register index
     local_registers: BTreeMap<String, u8>,
-    /// Next available register for locals (R0-R5, R6-R7 reserved for MBA)
+    /// Next available register for locals (R0-R247, R248-R255 reserved for MBA)
     next_local_reg: u8,
     /// Current input buffer offset for next argument
     next_arg_offset: usize,
@@ -815,8 +815,8 @@ impl Compiler {
         let (start_expr, end_expr, inclusive) = self.parse_range_expr(&for_loop.expr)?;
 
         // Allocate register for loop variable
-        if self.next_local_reg >= 8 {
-            return Err(CompileError("Too many local variables (max 8)".to_string()));
+        if self.next_local_reg >= 248 {
+            return Err(CompileError("Too many local variables (max 248)".to_string()));
         }
         let loop_reg = self.next_local_reg;
         self.next_local_reg += 1;
@@ -1085,8 +1085,8 @@ impl Compiler {
                 existing_reg
             } else {
                 // Allocate new register
-                if self.next_local_reg >= 8 {
-                    return Err(CompileError("Too many local variables (max 8)".to_string()));
+                if self.next_local_reg >= 248 {
+                    return Err(CompileError("Too many local variables (max 248)".to_string()));
                 }
                 let reg = self.next_local_reg;
                 self.next_local_reg += 1;

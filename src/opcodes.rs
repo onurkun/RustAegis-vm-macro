@@ -17,7 +17,7 @@ pub mod stack {
     pub const PUSH_IMM32: u8 = 0x09;
 }
 
-/// Register Operations (R0-R7)
+/// Register Operations (R0-R255)
 pub mod register {
     pub const MOV_IMM: u8 = 0x10;
     pub const MOV_REG: u8 = 0x11;

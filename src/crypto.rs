@@ -17,22 +17,12 @@ const NONCE_DOMAIN: &[u8] = b"anticheat-vm-nonce-v1";
 const BUILDID_DOMAIN: &[u8] = b"anticheat-vm-build-id-v1";
 const OPCODE_SHUFFLE_DOMAIN: &[u8] = b"opcode-shuffle-v1";
 
-/// Get build seed from environment or shared file
+/// Get build seed from shared file
 /// This is called at proc-macro expansion time (compile time)
 pub fn get_build_seed() -> [u8; 32] {
-    // Check for explicit build key (for reproducible builds)
-    if let Ok(key) = std::env::var("ANTICHEAT_BUILD_KEY") {
-        // Use HMAC to derive seed from key
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(key.as_bytes())
-            .expect("HMAC can take any size key");
-        mac.update(b"anticheat-vm-seed-v1");
-        let result = mac.finalize();
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&result.into_bytes());
-        return seed;
-    }
-
-    // Try to read shared seed file written by vm build.rs
+    // ALWAYS read shared seed file written by vm build.rs
+    // We do NOT calculate seed from env var here because HMAC implementation
+    // might differ from build.rs (different crates/versions), leading to opcode mismatch.
     if let Some(seed) = read_shared_seed() {
         return seed;
     }
@@ -247,7 +237,7 @@ pub fn encrypt_with_seed(bytecode: &[u8], function_id: u64) -> Result<EncryptedP
 }
 
 /// Base opcode definitions (canonical values)
-/// Must match the definitions in vm/build.rs
+/// Must match the definitions in vm/build.rs EXACTLY (same order!)
 const BASE_OPCODES: &[u8] = &[
     // Stack operations
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
@@ -263,6 +253,8 @@ const BASE_OPCODES: &[u8] = &[
     0x50, 0x51, 0x52, 0x53, 0x54, 0x55,
     // Memory operations
     0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+    // Heap operations (must match vm/build.rs)
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A,
     // Native calls
     0xF0, 0xF1, 0xF2, 0xF3,
     // Execution control (HALT/HALT_ERR are kept fixed)

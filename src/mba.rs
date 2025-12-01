@@ -137,14 +137,14 @@ impl MbaTransformer {
 
                 output.push(opcode_encoder(stack::DUP));      // [y, x, x]
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7); // R7 = x (temp register)
+                output.push(249); // R249 = x (temp register)
 
                 output.push(opcode_encoder(stack::SWAP));     // [x, y]
                 output.push(opcode_encoder(stack::DUP));      // [x, y, y]
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6); // R6 = y (temp register)
+                output.push(248); // R248 = y (temp register)
 
-                // Now stack is [x, y], R7=x, R6=y
+                // Now stack is [x, y], R249=x, R248=y
                 // Compute x & y
                 output.push(opcode_encoder(arithmetic::AND)); // [x & y]
 
@@ -155,9 +155,9 @@ impl MbaTransformer {
 
                 // Now compute x ^ y
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7); // push x
+                output.push(249); // push x
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6); // push y
+                output.push(248); // push y
                 output.push(opcode_encoder(arithmetic::XOR)); // [2*(x&y), x^y]
 
                 // Add them
@@ -171,22 +171,22 @@ impl MbaTransformer {
                 // Save x and y to temp registers
                 output.push(opcode_encoder(stack::DUP));      // [y, x, x]
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7); // R7 = x
+                output.push(249); // R249 = x
 
                 output.push(opcode_encoder(stack::SWAP));     // [x, y]
                 output.push(opcode_encoder(stack::DUP));      // [x, y, y]
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6); // R6 = y
+                output.push(248); // R248 = y
 
-                // Stack: [x, y], R7=x, R6=y
+                // Stack: [x, y], R249=x, R248=y
                 // Compute x | y
                 output.push(opcode_encoder(arithmetic::OR));  // [x | y]
 
                 // Compute x & y
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7);
+                output.push(249);
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6);
+                output.push(248);
                 output.push(opcode_encoder(arithmetic::AND)); // [x|y, x&y]
 
                 // Add them
@@ -200,12 +200,12 @@ impl MbaTransformer {
                 // Save x and y
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7); // R7 = x
+                output.push(249); // R249 = x
 
                 output.push(opcode_encoder(stack::SWAP));
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6); // R6 = y
+                output.push(248); // R248 = y
 
                 // Compute x | y
                 output.push(opcode_encoder(arithmetic::OR));  // [x | y]
@@ -217,9 +217,9 @@ impl MbaTransformer {
 
                 // Compute x ^ y
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7);
+                output.push(249);
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6);
+                output.push(248);
                 output.push(opcode_encoder(arithmetic::XOR)); // [2*(x|y), x^y]
 
                 // Subtract
@@ -261,14 +261,14 @@ impl MbaTransformer {
                 // Save a and b
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7); // R7 = b
+                output.push(249); // R249 = b
 
                 output.push(opcode_encoder(stack::SWAP));
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6); // R6 = a
+                output.push(248); // R248 = a
 
-                // Stack: [b, a], R7=b, R6=a
+                // Stack: [b, a], R249=b, R248=a
                 output.push(opcode_encoder(stack::SWAP)); // [a, b]
 
                 // Compute a ^ b
@@ -276,10 +276,10 @@ impl MbaTransformer {
 
                 // Compute ~a & b
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6); // push a
+                output.push(248); // push a
                 output.push(opcode_encoder(arithmetic::NOT)); // [a^b, ~a]
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7); // push b
+                output.push(249); // push b
                 output.push(opcode_encoder(arithmetic::AND)); // [a^b, ~a & b]
 
                 // Multiply by 2
@@ -298,30 +298,30 @@ impl MbaTransformer {
                 // Save operands
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7); // R7 = b (top of stack)
+                output.push(249); // R249 = b (top of stack)
 
                 output.push(opcode_encoder(stack::SWAP));
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6); // R6 = a
+                output.push(248); // R248 = a
 
                 output.push(opcode_encoder(stack::DROP)); // drop extra
                 output.push(opcode_encoder(stack::DROP)); // drop extra
 
                 // Compute a & ~b
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6); // push a
+                output.push(248); // push a
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7); // push b
+                output.push(249); // push b
                 output.push(opcode_encoder(arithmetic::NOT)); // [a, ~b]
                 output.push(opcode_encoder(arithmetic::AND)); // [a & ~b]
 
                 // Compute ~a & b
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6); // push a
+                output.push(248); // push a
                 output.push(opcode_encoder(arithmetic::NOT)); // [a&~b, ~a]
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7); // push b
+                output.push(249); // push b
                 output.push(opcode_encoder(arithmetic::AND)); // [a&~b, ~a & b]
 
                 // Subtract
@@ -345,21 +345,21 @@ impl MbaTransformer {
                 // Save operands
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7); // R7 = y (top)
+                output.push(249); // R249 = y (top)
 
                 output.push(opcode_encoder(stack::SWAP));
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6); // R6 = x
+                output.push(248); // R248 = x
 
                 // Compute x | y
                 output.push(opcode_encoder(arithmetic::OR)); // [x | y]
 
                 // Compute x & y
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6);
+                output.push(248);
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7);
+                output.push(249);
                 output.push(opcode_encoder(arithmetic::AND)); // [x|y, x&y]
 
                 // NOT and AND
@@ -373,30 +373,30 @@ impl MbaTransformer {
                 // Save operands
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7); // R7 = y
+                output.push(249); // R249 = y
 
                 output.push(opcode_encoder(stack::SWAP));
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6); // R6 = x
+                output.push(248); // R248 = x
 
                 output.push(opcode_encoder(stack::DROP));
                 output.push(opcode_encoder(stack::DROP));
 
                 // Compute x & ~y
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6); // x
+                output.push(248); // x
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7); // y
+                output.push(249); // y
                 output.push(opcode_encoder(arithmetic::NOT)); // ~y
                 output.push(opcode_encoder(arithmetic::AND)); // x & ~y
 
                 // Compute ~x & y
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6); // x
+                output.push(248); // x
                 output.push(opcode_encoder(arithmetic::NOT)); // ~x
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7); // y
+                output.push(249); // y
                 output.push(opcode_encoder(arithmetic::AND)); // ~x & y
 
                 // OR them
@@ -409,21 +409,21 @@ impl MbaTransformer {
                 // Save operands
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(7);
+                output.push(249);
 
                 output.push(opcode_encoder(stack::SWAP));
                 output.push(opcode_encoder(stack::DUP));
                 output.push(opcode_encoder(stack::POP_REG));
-                output.push(6);
+                output.push(248);
 
                 // Compute x | y
                 output.push(opcode_encoder(arithmetic::OR));
 
                 // Compute x & y
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(6);
+                output.push(248);
                 output.push(opcode_encoder(stack::PUSH_REG));
-                output.push(7);
+                output.push(249);
                 output.push(opcode_encoder(arithmetic::AND));
 
                 // Subtract
