@@ -117,6 +117,32 @@ pub mod vector {
     pub const VEC_RESERVE: u8 = 0x89;
 }
 
+/// Heap Operations (Dynamic Memory)
+pub mod heap {
+    /// Allocate memory: [size] -> [address]
+    pub const HEAP_ALLOC: u8 = 0x70;
+    /// Free memory: [address] -> []
+    pub const HEAP_FREE: u8 = 0x71;
+    /// Load u8: [address] -> [value]
+    pub const HEAP_LOAD8: u8 = 0x72;
+    /// Load u16: [address] -> [value]
+    pub const HEAP_LOAD16: u8 = 0x73;
+    /// Load u32: [address] -> [value]
+    pub const HEAP_LOAD32: u8 = 0x74;
+    /// Load u64: [address] -> [value]
+    pub const HEAP_LOAD64: u8 = 0x75;
+    /// Store u8: [address, value] -> []
+    pub const HEAP_STORE8: u8 = 0x76;
+    /// Store u16: [address, value] -> []
+    pub const HEAP_STORE16: u8 = 0x77;
+    /// Store u32: [address, value] -> []
+    pub const HEAP_STORE32: u8 = 0x78;
+    /// Store u64: [address, value] -> []
+    pub const HEAP_STORE64: u8 = 0x79;
+    /// Get heap size: [] -> [size]
+    pub const HEAP_SIZE: u8 = 0x7A;
+}
+
 /// String Operations
 pub mod string {
     /// Create new string: [capacity] -> [str_addr]

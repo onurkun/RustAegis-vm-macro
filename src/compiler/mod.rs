@@ -22,16 +22,12 @@ mod control;
 mod method;
 mod cast;
 
-use syn::{ItemFn, Expr, Stmt, BinOp, UnOp, Pat, FnArg, Lit};
+use syn::{ItemFn, Pat, FnArg};
 use std::collections::BTreeMap;
-use crate::opcodes::{stack, arithmetic, control as ctrl, native, exec, vector, string, heap, convert};
+use crate::opcodes::exec;
 use crate::crypto::OpcodeTable;
 use crate::mba::MbaTransformer;
-use crate::substitution::{
-    Substitution, IncSubstitution, DecSubstitution, NotSubstitution,
-    AndSubstitution, OrSubstitution, ConstantSubstitution, ZeroSubstitution,
-    AddSubstitution, SubSubstitution, DeadCodeInsertion,
-};
+use crate::substitution::Substitution;
 use crate::value_cryptor::ValueCryptor;
 
 /// Compilation error
@@ -44,8 +40,35 @@ impl std::fmt::Display for CompileError {
     }
 }
 
+/// Variable type for proper method dispatch
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum VarType {
+    /// Integer (u8, u16, u32, u64, i8, i16, i32, i64)
+    Integer,
+    /// String (heap allocated)
+    String,
+    /// Vector/Array (heap allocated)
+    Vector,
+    /// Boolean
+    Bool,
+}
+
+/// Variable information - register and type
+#[derive(Debug, Clone)]
+pub(crate) struct VarInfo {
+    /// Register index
+    pub reg: u8,
+    /// Variable type
+    pub var_type: VarType,
+    /// Is signed (for integers)
+    pub is_signed: bool,
+    /// Needs heap cleanup on scope exit
+    pub needs_cleanup: bool,
+}
+
 /// Variable location - either in input buffer or in a register
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) enum VarLocation {
     /// Input buffer offset (for function arguments)
     InputOffset(usize),
@@ -73,9 +96,10 @@ pub struct Compiler {
     pub(crate) bytecode: Vec<u8>,
     /// Function argument name -> input buffer offset
     pub(crate) arg_offsets: BTreeMap<String, usize>,
-    /// Local variable name -> register index
-    pub(crate) local_registers: BTreeMap<String, u8>,
-    /// Variable types for method dispatch
+    /// Scoped variable storage - Vec of scopes, each scope maps name -> VarInfo
+    /// Innermost scope is at the end of the Vec
+    pub(crate) scopes: Vec<BTreeMap<String, VarInfo>>,
+    /// Legacy: Variable types for method dispatch (will be deprecated)
     pub(crate) var_types: BTreeMap<String, VarLocation>,
     /// Next available register for locals
     pub(crate) next_local_reg: u8,
@@ -120,10 +144,14 @@ impl Compiler {
     pub fn with_options(mba_enabled: bool, substitution_enabled: bool) -> Self {
         let seed = crate::crypto::get_opcode_table().get_seed();
 
+        // Start with one global scope
+        let mut scopes = Vec::new();
+        scopes.push(BTreeMap::new());
+
         Self {
             bytecode: Vec::new(),
             arg_offsets: BTreeMap::new(),
-            local_registers: BTreeMap::new(),
+            scopes,
             var_types: BTreeMap::new(),
             next_local_reg: 0,
             next_arg_offset: 0,
@@ -163,19 +191,112 @@ impl Compiler {
         self.next_arg_offset += 8;
     }
 
-    /// Get variable location (argument or local)
+    // =========================================================================
+    // Scope Management
+    // =========================================================================
+
+    /// Push a new scope (called at block entry)
+    pub(crate) fn push_scope(&mut self) {
+        self.scopes.push(BTreeMap::new());
+    }
+
+    /// Pop current scope and emit cleanup for heap variables
+    pub(crate) fn pop_scope(&mut self) {
+        if let Some(scope) = self.scopes.pop() {
+            // Emit HEAP_FREE for variables that need cleanup
+            for (_name, info) in scope.iter() {
+                if info.needs_cleanup {
+                    // Push the heap address from register, then free it
+                    self.emit_push_reg(info.reg);
+                    self.emit_heap_free();
+                }
+            }
+        }
+    }
+
+    /// Define a variable in the current scope
+    pub(crate) fn define_var(&mut self, name: &str, var_type: VarType, is_signed: bool) -> Result<u8, CompileError> {
+        if self.next_local_reg >= 248 {
+            return Err(CompileError("Too many local variables (max 248)".to_string()));
+        }
+
+        let reg = self.next_local_reg;
+        self.next_local_reg += 1;
+
+        let needs_cleanup = matches!(var_type, VarType::String | VarType::Vector);
+
+        let info = VarInfo {
+            reg,
+            var_type,
+            is_signed,
+            needs_cleanup,
+        };
+
+        // Add to current scope
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), info);
+        }
+
+        // Also update legacy var_types for compatibility
+        match var_type {
+            VarType::String => {
+                self.var_types.insert(name.to_string(), VarLocation::String(reg));
+            }
+            VarType::Vector => {
+                self.var_types.insert(name.to_string(), VarLocation::Array(reg, 8));
+            }
+            _ => {
+                self.var_types.insert(name.to_string(), VarLocation::Register(reg));
+            }
+        }
+
+        Ok(reg)
+    }
+
+    /// Lookup a variable in all scopes (innermost first)
+    pub(crate) fn lookup_var(&self, name: &str) -> Option<&VarInfo> {
+        // Search from innermost to outermost scope
+        for scope in self.scopes.iter().rev() {
+            if let Some(info) = scope.get(name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    /// Check if a variable is signed
+    pub(crate) fn is_var_signed(&self, name: &str) -> bool {
+        if let Some(info) = self.lookup_var(name) {
+            return info.is_signed;
+        }
+        false
+    }
+
+    /// Get variable type
+    pub(crate) fn get_var_type(&self, name: &str) -> Option<VarType> {
+        if let Some(info) = self.lookup_var(name) {
+            return Some(info.var_type);
+        }
+        None
+    }
+
+    /// Get variable location (argument or local) - uses new scope system
     pub(crate) fn get_var_location(&self, name: &str) -> Option<VarLocation> {
-        // Check var_types first for type info
-        if let Some(loc) = self.var_types.get(name) {
-            return Some(loc.clone());
+        // Check scopes first (innermost to outermost)
+        if let Some(info) = self.lookup_var(name) {
+            return match info.var_type {
+                VarType::String => Some(VarLocation::String(info.reg)),
+                VarType::Vector => Some(VarLocation::Array(info.reg, 8)),
+                _ => Some(VarLocation::Register(info.reg)),
+            };
         }
         // Check arguments
         if let Some(&offset) = self.arg_offsets.get(name) {
             return Some(VarLocation::InputOffset(offset));
         }
-        // Check locals
-        if let Some(&reg) = self.local_registers.get(name) {
-            return Some(VarLocation::Register(reg));
+        // Legacy fallback
+        if let Some(loc) = self.var_types.get(name) {
+            return Some(loc.clone());
         }
         None
     }
@@ -244,6 +365,7 @@ pub fn compile_function_with_substitution(func: &ItemFn) -> Result<Vec<u8>, Comp
 }
 
 /// Compile a function with full obfuscation (MBA + Substitution)
+#[allow(dead_code)]
 pub fn compile_function_paranoid(func: &ItemFn) -> Result<Vec<u8>, CompileError> {
     compile_function_full(func, true, true)
 }

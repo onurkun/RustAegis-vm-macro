@@ -58,27 +58,70 @@ fn parse_protection_level(attr: &str) -> ProtectionLevel {
 /// ## Supported Rust Subset
 ///
 /// ### Types (parameters and return)
-/// - `u64`, `u32`, `i64`, `i32` - integers
+/// - `u64`, `u32`, `i64`, `i32`, `u16`, `u8`, `i16`, `i8` - integers
 /// - `bool` - converted to u64 (0/1)
+/// - `char` - single characters
+///
+/// ### Literals
+/// - Integer literals: `42`, `0xDEAD`, `0b1010`
+/// - Boolean literals: `true`, `false`
+/// - String literals: `"hello"` - creates heap string
+/// - Char literals: `'a'`
+/// - Byte literals: `b'a'`, `b"hello"`
 ///
 /// ### Expressions
-/// - Integer literals: `42`, `0xDEAD`, `0b1010`
-/// - Binary operators: `+`, `-`, `*`, `^`, `&`, `|`, `<<`, `>>`
+/// - Binary operators: `+`, `-`, `*`, `/`, `%`, `^`, `&`, `|`, `<<`, `>>`
 /// - Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=`
-/// - Unary operators: `!`, `-`
+/// - Unary operators: `!`, `-`, `*` (deref)
+/// - Type casts: `x as u32`, `y as i64`
 /// - Parentheses: `(a + b) * c`
-/// - Simple if/else: `if cond { a } else { b }`
+///
+/// ### Control Flow
+/// - `if`/`else` expressions
+/// - `while` loops
+/// - `for i in 0..n` loops (ranges)
+/// - `loop` (infinite)
+/// - `break`, `continue`
+/// - `return` (early return)
+///
+/// ### Arrays & Vectors
+/// - Array literals: `[1, 2, 3]`
+/// - Repeat syntax: `[0; 10]`
+/// - Index access: `arr[i]`
+/// - Index assignment: `arr[i] = value`
+///
+/// ### Method Calls (NEW!)
+/// - `.len()` - get length
+/// - `.push(value)` - add element
+/// - `.pop()` - remove last element
+/// - `.get(index)` - get element
+/// - `.clear()` - clear collection
+/// - `.capacity()` - get capacity
+/// - `.is_empty()` - check if empty
+/// - `.concat(other)` - concatenate strings
+/// - `.eq(other)` - string equality
+/// - `.hash()` - string hash
+/// - `.min(other)`, `.max(other)` - numeric min/max
+/// - `.wrapping_add()`, `.wrapping_sub()`, `.wrapping_mul()`
+/// - `.rotate_left()`, `.rotate_right()`
+///
+/// ### String Support (NEW!)
+/// - String literals: `let s = "hello";`
+/// - String concatenation: `s1.concat(s2)`
+/// - String comparison: `s1.eq(s2)`
+/// - String methods: `.len()`, `.push()`, `.get()`
+///
+/// ### Constructors
+/// - `String::new()`, `String::with_capacity(n)`
+/// - `Vec::new()`, `Vec::with_capacity(n)`
 ///
 /// ### Not Supported
-/// - Heap allocation (Box, Vec, String)
-/// - References and borrowing
-/// - Loops (for, while, loop)
 /// - Match expressions
 /// - Closures
 /// - Async/await
 /// - Panic, unwrap, expect
-/// - Method calls
 /// - Struct/enum construction
+/// - Complex borrowing patterns
 ///
 /// ## Attributes
 ///
