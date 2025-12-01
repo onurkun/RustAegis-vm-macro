@@ -18,8 +18,16 @@ impl Compiler {
             // Detect type from explicit annotation or initializer
             let (var_type, is_signed) = self.detect_full_type(&local.pat, &init.expr);
 
+            // Check if this is a borrowed tuple extraction (let inner = t.0)
+            // Borrowed values don't need cleanup since the original owns the memory
+            let is_borrowed = self.is_borrowed_tuple_extraction(&init.expr);
+
             // Define variable in current scope (allocates register)
-            let reg = self.define_var(&name, var_type, is_signed)?;
+            let reg = if is_borrowed {
+                self.define_var_borrowed(&name, var_type, is_signed)?
+            } else {
+                self.define_var(&name, var_type, is_signed)?
+            };
 
             // Pop value to register
             self.emit_pop_reg(reg);
@@ -27,6 +35,23 @@ impl Compiler {
             return Err(CompileError("Uninitialized let bindings not supported".to_string()));
         }
         Ok(())
+    }
+
+    /// Check if expression extracts a tuple from another variable (borrowed reference)
+    fn is_borrowed_tuple_extraction(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Field(field) => {
+                if let syn::Member::Unnamed(_) = &field.member {
+                    // Check if base is a tuple variable or another tuple extraction
+                    self.is_tuple_expr_for_assignment(&field.base) ||
+                    self.is_borrowed_tuple_extraction(&field.base)
+                } else {
+                    false
+                }
+            }
+            Expr::Paren(paren) => self.is_borrowed_tuple_extraction(&paren.expr),
+            _ => false,
+        }
     }
 
     /// Detect full type information from pattern and initializer
@@ -42,7 +67,14 @@ impl Compiler {
                         "bool" => (VarType::Bool, false),
                         "String" => (VarType::String, false),
                         "Vec" => (VarType::Vector, false),
-                        _ => self.infer_type_from_expr(init),
+                        _ => {
+                            // Check if it's a known struct type
+                            if self.struct_defs.contains_key(&type_name) {
+                                (VarType::Struct(type_name), false)
+                            } else {
+                                self.infer_type_from_expr(init)
+                            }
+                        }
                     };
                 }
             }
@@ -83,13 +115,17 @@ impl Compiler {
                     }
                 }
             }
-            // Path expressions - check existing type
+            // Path expressions - check existing type or unit struct
             Expr::Path(path) => {
                 if path.path.segments.len() == 1 {
                     let name = path.path.segments[0].ident.to_string();
+                    // First check if it's an existing variable
                     if let Some(var_type) = self.get_var_type(&name) {
                         let is_signed = self.is_var_signed(&name);
                         (var_type, is_signed)
+                    // Then check if it's a unit struct instantiation
+                    } else if self.struct_defs.contains_key(&name) {
+                        (VarType::Struct(name), false)
                     } else {
                         (VarType::Integer, false)
                     }
@@ -108,6 +144,46 @@ impl Compiler {
             // Binary expression - use left operand type
             Expr::Binary(binary) => {
                 self.infer_type_from_expr(&binary.left)
+            }
+            // Struct literal
+            Expr::Struct(expr_struct) => {
+                let struct_name = expr_struct.path.segments.iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                (VarType::Struct(struct_name), false)
+            }
+            // Tuple literal - infer each element's type
+            Expr::Tuple(tuple) => {
+                let elem_types: Vec<VarType> = tuple.elems.iter()
+                    .map(|elem| self.infer_type_from_expr(elem).0)
+                    .collect();
+                (VarType::Tuple(elem_types), false)
+            }
+            // Field access - might be tuple index (t.0) returning nested tuple
+            Expr::Field(field) => {
+                if let syn::Member::Unnamed(idx) = &field.member {
+                    // Try to get tuple element type
+                    if let Some(elem_type) = self.get_tuple_element_type_for_inference(&field.base, idx.index as usize) {
+                        return (elem_type, false);
+                    }
+                }
+                // Not a tuple index, default to integer
+                (VarType::Integer, false)
+            }
+            // Function call - might be tuple struct
+            Expr::Call(call) => {
+                if let Expr::Path(path) = &*call.func {
+                    let func_name = path.path.segments.iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    // Check if it's a known struct (tuple struct)
+                    if self.struct_defs.contains_key(&func_name) {
+                        return (VarType::Struct(func_name), false);
+                    }
+                }
+                (VarType::Integer, false)
             }
             // Default to integer
             _ => (VarType::Integer, false),
@@ -172,8 +248,13 @@ impl Compiler {
                 self.compile_index_assignment(&index.expr, &index.index, value)?;
             }
 
+            // Field assignment: p.x = value
+            Expr::Field(field_expr) => {
+                self.compile_field_assignment(field_expr, value)?;
+            }
+
             _ => {
-                return Err(CompileError("Only simple variable or index assignment supported".to_string()));
+                return Err(CompileError("Only simple variable, index, or field assignment supported".to_string()));
             }
         }
         Ok(())
@@ -228,5 +309,168 @@ impl Compiler {
         self.emit_pop_reg(reg);
 
         Ok(())
+    }
+
+    /// Compile field assignment: p.x = value or t.0 = value
+    fn compile_field_assignment(&mut self, field: &syn::ExprField, value: &Expr) -> Result<(), CompileError> {
+        // Check if this is tuple index assignment (t.0, t.1, etc.)
+        if let syn::Member::Unnamed(index) = &field.member {
+            if self.is_tuple_expr_for_assignment(&field.base) {
+                return self.compile_tuple_index_assignment(field, index.index as usize, value);
+            }
+        }
+
+        // Compile base expression (pushes struct address)
+        self.compile_expr(&field.base)?;
+
+        // Get field name
+        let field_name = match &field.member {
+            syn::Member::Named(ident) => ident.to_string(),
+            syn::Member::Unnamed(index) => index.index.to_string(),
+        };
+
+        // Infer struct type from base expression
+        let struct_name = self.infer_struct_type_for_assignment(&field.base)?;
+
+        // Look up struct definition
+        let struct_def = self.struct_defs.get(&struct_name)
+            .ok_or_else(|| CompileError(format!("Unknown struct: {}", struct_name)))?;
+
+        // Get field offset
+        let offset = struct_def.get_field_offset(&field_name)
+            .ok_or_else(|| CompileError(format!("Unknown field: {}.{}", struct_name, field_name)))?;
+
+        // Add offset to get target address
+        if offset > 0 {
+            self.emit_constant(offset as u64);
+            self.emit_add();
+        }
+
+        // Compile value
+        self.compile_expr(value)?;
+
+        // Store: [addr, value] -> []
+        self.emit_heap_store64();
+
+        Ok(())
+    }
+
+    /// Check if expression is a tuple (for assignment)
+    fn is_tuple_expr_for_assignment(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    matches!(self.get_var_type(&name), Some(VarType::Tuple(_)))
+                } else {
+                    false
+                }
+            }
+            Expr::Paren(paren) => self.is_tuple_expr_for_assignment(&paren.expr),
+            _ => false,
+        }
+    }
+
+    /// Compile tuple index assignment: t.0 = value
+    fn compile_tuple_index_assignment(&mut self, field: &syn::ExprField, index: usize, value: &Expr) -> Result<(), CompileError> {
+        // Get tuple type to calculate proper offset
+        let tuple_type = self.get_tuple_type_for_assignment(&field.base);
+
+        // Compile base expression (pushes tuple address)
+        self.compile_expr(&field.base)?;
+
+        // Calculate offset based on element types
+        let offset = if let Some(elems) = &tuple_type {
+            // Sum of aligned sizes of elements before index
+            elems.iter().take(index).map(|t| t.aligned_size()).sum()
+        } else {
+            // Fallback to 8 bytes per element
+            index * 8
+        };
+
+        // Add offset to get target address
+        if offset > 0 {
+            self.emit_constant(offset as u64);
+            self.emit_add();
+        }
+
+        // Compile value
+        self.compile_expr(value)?;
+
+        // Store: [addr, value] -> []
+        self.emit_heap_store64();
+
+        Ok(())
+    }
+
+    /// Get tuple element type at given index (for type inference)
+    fn get_tuple_element_type_for_inference(&self, expr: &Expr, index: usize) -> Option<VarType> {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if let Some(VarType::Tuple(elems)) = self.get_var_type(&name) {
+                        return elems.get(index).cloned();
+                    }
+                }
+                None
+            }
+            Expr::Tuple(tuple) => {
+                // Infer type from literal element
+                if let Some(elem) = tuple.elems.iter().nth(index) {
+                    Some(self.infer_type_from_expr(elem).0)
+                } else {
+                    None
+                }
+            }
+            Expr::Paren(paren) => self.get_tuple_element_type_for_inference(&paren.expr, index),
+            Expr::Field(field) => {
+                // Nested field access: (t.0).1
+                if let syn::Member::Unnamed(idx) = &field.member {
+                    if let Some(VarType::Tuple(inner_elems)) = self.get_tuple_element_type_for_inference(&field.base, idx.index as usize) {
+                        return inner_elems.get(index).cloned();
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Get tuple type for assignment (to calculate proper offsets)
+    fn get_tuple_type_for_assignment(&self, expr: &Expr) -> Option<Vec<VarType>> {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if let Some(VarType::Tuple(elems)) = self.get_var_type(&name) {
+                        return Some(elems);
+                    }
+                }
+                None
+            }
+            Expr::Paren(paren) => self.get_tuple_type_for_assignment(&paren.expr),
+            _ => None,
+        }
+    }
+
+    /// Infer struct type for field assignment
+    fn infer_struct_type_for_assignment(&self, expr: &Expr) -> Result<String, CompileError> {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if let Some(VarType::Struct(struct_name)) = self.get_var_type(&name) {
+                        return Ok(struct_name);
+                    }
+                }
+                Err(CompileError(format!("Cannot infer struct type from variable '{}'",
+                    path.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))))
+            }
+            Expr::Paren(paren) => {
+                self.infer_struct_type_for_assignment(&paren.expr)
+            }
+            _ => Err(CompileError("Cannot infer struct type for assignment".to_string())),
+        }
     }
 }

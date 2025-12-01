@@ -41,16 +41,92 @@ impl std::fmt::Display for CompileError {
 }
 
 /// Variable type for proper method dispatch
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum VarType {
-    /// Integer (u8, u16, u32, u64, i8, i16, i32, i64)
+    /// Integer (u8, u16, u32, u64, i8, i16, i32, i64) with optional size in bytes
     Integer,
+    /// Sized integer with explicit byte size (1, 2, 4, or 8)
+    IntegerSized(u8),
     /// String (heap allocated)
     String,
     /// Vector/Array (heap allocated)
     Vector,
-    /// Boolean
+    /// Boolean (1 byte logically, but stored as 8 bytes for alignment)
     Bool,
+    /// Struct (heap allocated) - contains struct type name
+    Struct(std::string::String),
+    /// Tuple (heap allocated) - contains element types for proper offset calculation
+    Tuple(Vec<VarType>),
+}
+
+impl VarType {
+    /// Get the size in bytes for this type (for tuple offset calculation)
+    /// All types are stored as 8 bytes for alignment, but this tracks logical size
+    pub fn size_bytes(&self) -> usize {
+        match self {
+            VarType::Integer => 8,
+            VarType::IntegerSized(size) => *size as usize,
+            VarType::String => 8,  // pointer
+            VarType::Vector => 8,  // pointer
+            VarType::Bool => 8,    // stored as u64 for alignment
+            VarType::Struct(_) => 8, // pointer
+            VarType::Tuple(elems) => {
+                // Sum of all element sizes (each aligned to 8 bytes)
+                elems.iter().map(|e| e.aligned_size()).sum()
+            }
+        }
+    }
+
+    /// Get aligned size (always 8 bytes for heap storage)
+    pub fn aligned_size(&self) -> usize {
+        // For now, all values are stored as 8 bytes for simplicity
+        // This could be optimized later for packed storage
+        8
+    }
+
+    /// Check if this type needs heap cleanup
+    pub fn needs_cleanup(&self) -> bool {
+        match self {
+            VarType::String | VarType::Vector => true,
+            VarType::Struct(_) => true, // checked separately for unit structs
+            VarType::Tuple(elems) => {
+                // Tuple needs cleanup if it has elements (allocated on heap)
+                // or if any element needs cleanup
+                !elems.is_empty() || elems.iter().any(|e| e.needs_cleanup())
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Struct field definition
+#[derive(Debug, Clone)]
+pub(crate) struct FieldDef {
+    /// Field name
+    pub name: std::string::String,
+    /// Byte offset from struct start
+    pub offset: usize,
+}
+
+/// Struct definition for compile-time field lookup
+#[derive(Debug, Clone)]
+pub(crate) struct StructDef {
+    /// Struct name (kept for debugging/error messages)
+    #[allow(dead_code)]
+    pub name: std::string::String,
+    /// Fields with their offsets
+    pub fields: Vec<FieldDef>,
+    /// Total size in bytes
+    pub size: usize,
+}
+
+impl StructDef {
+    /// Get field offset by name
+    pub fn get_field_offset(&self, field_name: &str) -> Option<usize> {
+        self.fields.iter()
+            .find(|f| f.name == field_name)
+            .map(|f| f.offset)
+    }
 }
 
 /// Variable information - register and type
@@ -88,6 +164,8 @@ pub(crate) struct LoopContext {
     pub continue_label: String,
     /// Label for break (jump past loop end)
     pub break_label: String,
+    /// Scope depth when loop started (for cleanup on break/continue)
+    pub scope_depth: usize,
 }
 
 /// Compiler state
@@ -101,6 +179,8 @@ pub struct Compiler {
     pub(crate) scopes: Vec<BTreeMap<String, VarInfo>>,
     /// Legacy: Variable types for method dispatch (will be deprecated)
     pub(crate) var_types: BTreeMap<String, VarLocation>,
+    /// Struct definitions for compile-time field lookup
+    pub(crate) struct_defs: BTreeMap<String, StructDef>,
     /// Next available register for locals
     pub(crate) next_local_reg: u8,
     /// Current input buffer offset for next argument
@@ -153,6 +233,7 @@ impl Compiler {
             arg_offsets: BTreeMap::new(),
             scopes,
             var_types: BTreeMap::new(),
+            struct_defs: BTreeMap::new(),
             next_local_reg: 0,
             next_arg_offset: 0,
             labels: BTreeMap::new(),
@@ -214,8 +295,57 @@ impl Compiler {
         }
     }
 
+    /// Get current scope depth (number of active scopes)
+    pub(crate) fn current_scope_depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Emit cleanup code for all scopes from current down to target_depth (exclusive)
+    /// Used for early exits (return, break, continue) to properly free heap memory
+    ///
+    /// Example: If we have scopes [global, func, loop, inner] (depth=4)
+    /// and target_depth=2 (loop level), we clean up [inner, loop] -> scopes at index 3, 2
+    pub(crate) fn emit_scope_cleanup(&mut self, target_depth: usize) {
+        let current_depth = self.scopes.len();
+
+        // Clean up scopes from innermost to target (exclusive)
+        // We iterate backwards from current to target
+        if current_depth <= target_depth {
+            return; // Nothing to clean up
+        }
+
+        // First, collect all registers that need cleanup (to avoid borrow issues)
+        let mut regs_to_free = Vec::new();
+        for depth in (target_depth..current_depth).rev() {
+            if let Some(scope) = self.scopes.get(depth) {
+                for (_name, info) in scope.iter() {
+                    if info.needs_cleanup {
+                        regs_to_free.push(info.reg);
+                    }
+                }
+            }
+        }
+
+        // Now emit cleanup code
+        for reg in regs_to_free {
+            self.emit_push_reg(reg);
+            self.emit_heap_free();
+        }
+    }
+
     /// Define a variable in the current scope
     pub(crate) fn define_var(&mut self, name: &str, var_type: VarType, is_signed: bool) -> Result<u8, CompileError> {
+        self.define_var_internal(name, var_type, is_signed, false)
+    }
+
+    /// Define a variable that borrows from another (no cleanup needed)
+    /// Used when extracting tuple elements: let inner = t.0
+    pub(crate) fn define_var_borrowed(&mut self, name: &str, var_type: VarType, is_signed: bool) -> Result<u8, CompileError> {
+        self.define_var_internal(name, var_type, is_signed, true)
+    }
+
+    /// Internal variable definition
+    fn define_var_internal(&mut self, name: &str, var_type: VarType, is_signed: bool, is_borrowed: bool) -> Result<u8, CompileError> {
         if self.next_local_reg >= 248 {
             return Err(CompileError("Too many local variables (max 248)".to_string()));
         }
@@ -223,7 +353,36 @@ impl Compiler {
         let reg = self.next_local_reg;
         self.next_local_reg += 1;
 
-        let needs_cleanup = matches!(var_type, VarType::String | VarType::Vector);
+        // Determine if cleanup is needed - borrowed values never need cleanup
+        // Unit structs/tuples (size 0) also don't need cleanup
+        let needs_cleanup = if is_borrowed {
+            false
+        } else {
+            match &var_type {
+                VarType::String | VarType::Vector => true,
+                VarType::Struct(struct_name) => {
+                    // Check struct size - unit structs don't need cleanup
+                    self.struct_defs.get(struct_name)
+                        .map(|def| def.size > 0)
+                        .unwrap_or(false)
+                }
+                VarType::Tuple(elems) => !elems.is_empty(),  // Empty tuple () doesn't need cleanup
+                _ => false,
+            }
+        };
+
+        // Update legacy var_types for compatibility (using reference before move)
+        match &var_type {
+            VarType::String => {
+                self.var_types.insert(name.to_string(), VarLocation::String(reg));
+            }
+            VarType::Vector => {
+                self.var_types.insert(name.to_string(), VarLocation::Array(reg, 8));
+            }
+            _ => {
+                self.var_types.insert(name.to_string(), VarLocation::Register(reg));
+            }
+        }
 
         let info = VarInfo {
             reg,
@@ -235,19 +394,6 @@ impl Compiler {
         // Add to current scope
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), info);
-        }
-
-        // Also update legacy var_types for compatibility
-        match var_type {
-            VarType::String => {
-                self.var_types.insert(name.to_string(), VarLocation::String(reg));
-            }
-            VarType::Vector => {
-                self.var_types.insert(name.to_string(), VarLocation::Array(reg, 8));
-            }
-            _ => {
-                self.var_types.insert(name.to_string(), VarLocation::Register(reg));
-            }
         }
 
         Ok(reg)
@@ -275,7 +421,7 @@ impl Compiler {
     /// Get variable type
     pub(crate) fn get_var_type(&self, name: &str) -> Option<VarType> {
         if let Some(info) = self.lookup_var(name) {
-            return Some(info.var_type);
+            return Some(info.var_type.clone());
         }
         None
     }

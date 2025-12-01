@@ -405,6 +405,11 @@ impl Compiler {
     // Heap Operations
     // =========================================================================
 
+    /// Emit HEAP_ALLOC: Stack: [size] -> [address]
+    pub(crate) fn emit_heap_alloc(&mut self) {
+        self.emit_op(heap::HEAP_ALLOC);
+    }
+
     /// Emit HEAP_FREE: Stack: [address] -> []
     pub(crate) fn emit_heap_free(&mut self) {
         self.emit_op(heap::HEAP_FREE);
@@ -413,6 +418,11 @@ impl Compiler {
     /// Emit HEAP_LOAD64: Stack: [address] -> [value]
     pub(crate) fn emit_heap_load64(&mut self) {
         self.emit_op(heap::HEAP_LOAD64);
+    }
+
+    /// Emit HEAP_STORE64: Stack: [address, value] -> []
+    pub(crate) fn emit_heap_store64(&mut self) {
+        self.emit_op(heap::HEAP_STORE64);
     }
 
     // =========================================================================

@@ -19,11 +19,25 @@ impl Compiler {
             }
 
             // =========================================================
-            // Variable reference
+            // Variable reference (or unit struct instantiation)
             // =========================================================
             Expr::Path(path) => {
                 if path.path.segments.len() == 1 {
                     let name = path.path.segments[0].ident.to_string();
+
+                    // Check if this is a unit struct instantiation (e.g., `let m = Marker;`)
+                    if let Some(struct_def) = self.struct_defs.get(&name) {
+                        if struct_def.size == 0 {
+                            // Unit struct - just push 0 as sentinel value
+                            self.emit_zero();
+                            return Ok(());
+                        } else {
+                            // Non-unit struct requires braces
+                            return Err(CompileError(format!(
+                                "Non-unit struct '{}' requires braces for instantiation", name
+                            )));
+                        }
+                    }
 
                     match self.get_var_location(&name) {
                         Some(VarLocation::InputOffset(offset)) => {
@@ -229,6 +243,9 @@ impl Compiler {
                 } else {
                     self.emit_zero();
                 }
+                // Clean up ALL scopes before returning (scope 0 is function args, no cleanup needed)
+                // This prevents memory leaks from early returns
+                self.emit_scope_cleanup(1);
                 self.emit_op(crate::opcodes::exec::HALT);
             }
 
@@ -237,6 +254,13 @@ impl Compiler {
             // =========================================================
             Expr::Block(block) => {
                 self.compile_block(&block.block)?;
+            }
+
+            // =========================================================
+            // Match expression
+            // =========================================================
+            Expr::Match(match_expr) => {
+                self.compile_match(match_expr)?;
             }
 
             // =========================================================
@@ -255,15 +279,24 @@ impl Compiler {
             }
 
             // =========================================================
-            // Tuple (limited support)
+            // Tuple: (), (a,), (a, b), (a, b, c)
             // =========================================================
             Expr::Tuple(tuple) => {
-                if tuple.elems.is_empty() {
-                    // Unit tuple ()
-                    self.emit_zero();
-                } else {
-                    return Err(CompileError("Non-unit tuples not yet supported".to_string()));
-                }
+                self.compile_tuple_expr(tuple)?;
+            }
+
+            // =========================================================
+            // Struct literal: Point { x: 1, y: 2 }
+            // =========================================================
+            Expr::Struct(expr_struct) => {
+                self.compile_struct_expr(expr_struct)?;
+            }
+
+            // =========================================================
+            // Field access: p.x
+            // =========================================================
+            Expr::Field(field_expr) => {
+                self.compile_field_access(field_expr)?;
             }
 
             // =========================================================
@@ -299,10 +332,10 @@ impl Compiler {
             }
 
             // =========================================================
-            // Function call: func(args)
+            // Function call: func(args) or tuple struct: Position(0, 0)
             // =========================================================
             Expr::Call(call) => {
-                // Check for built-in constructors
+                // Check for built-in constructors or tuple struct
                 if let Expr::Path(path) = &*call.func {
                     let func_name = path.path.segments.iter()
                         .map(|s| s.ident.to_string())
@@ -335,7 +368,16 @@ impl Compiler {
                                 return Ok(());
                             }
                         }
-                        _ => {}
+                        _ => {
+                            // Check if this is a tuple struct instantiation
+                            if let Some(struct_def) = self.struct_defs.get(&func_name).cloned() {
+                                // Verify it's a tuple struct (has numeric field names)
+                                if struct_def.fields.first().map(|f| f.name == "0").unwrap_or(true) {
+                                    self.compile_tuple_struct_expr(&func_name, &struct_def, &call.args)?;
+                                    return Ok(());
+                                }
+                            }
+                        }
                     }
                 }
                 return Err(CompileError("Function calls not yet supported (use native calls)".to_string()));
@@ -507,5 +549,427 @@ impl Compiler {
             }
             _ => false,
         }
+    }
+
+    // =========================================================================
+    // Struct Operations
+    // =========================================================================
+
+    /// Compile struct literal expression: Point { x: 1, y: 2 } or Point { x, y } or Point { x: 1, ..base }
+    fn compile_struct_expr(&mut self, expr_struct: &syn::ExprStruct) -> Result<(), CompileError> {
+        // Get struct name
+        let struct_name = expr_struct.path.segments.iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+
+        // Look up struct definition
+        let struct_def = self.struct_defs.get(&struct_name)
+            .ok_or_else(|| CompileError(format!("Unknown struct: {}", struct_name)))?
+            .clone();
+
+        // Handle zero-sized structs (unit structs)
+        if struct_def.size == 0 {
+            // Just return 0 as a sentinel value for unit structs
+            self.emit_zero();
+            return Ok(());
+        }
+
+        // Allocate memory: push size, call HEAP_ALLOC
+        self.emit_constant(struct_def.size as u64);
+        self.emit_heap_alloc();
+
+        // Stack now has: [struct_addr]
+        // Store in temp register to preserve across field writes
+        let temp_reg = self.next_local_reg;
+        self.next_local_reg += 1;
+        self.emit_dup();  // Keep address on stack for return
+        self.emit_pop_reg(temp_reg);
+
+        // Collect explicitly specified field names
+        let mut specified_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Write each explicitly specified field
+        for field_value in &expr_struct.fields {
+            let field_name = match &field_value.member {
+                syn::Member::Named(ident) => ident.to_string(),
+                syn::Member::Unnamed(index) => index.index.to_string(),
+            };
+
+            specified_fields.insert(field_name.clone());
+
+            let offset = struct_def.get_field_offset(&field_name)
+                .ok_or_else(|| CompileError(format!("Unknown field: {}.{}", struct_name, field_name)))?;
+
+            // Push base address + offset
+            self.emit_push_reg(temp_reg);
+            if offset > 0 {
+                self.emit_constant(offset as u64);
+                self.emit_add();
+            }
+
+            // Compile field value (handles shorthand like Point { x, y } where x means x: x)
+            self.compile_expr(&field_value.expr)?;
+
+            // Store: [addr, value] -> []
+            self.emit_heap_store64();
+        }
+
+        // Handle functional update syntax: Point { x: 1, ..base }
+        if let Some(rest) = &expr_struct.rest {
+            // Compile base expression (pushes base struct address)
+            self.compile_expr(rest)?;
+            let base_reg = self.next_local_reg;
+            self.next_local_reg += 1;
+            self.emit_pop_reg(base_reg);
+
+            // Copy unspecified fields from base
+            for field_def in &struct_def.fields {
+                if !specified_fields.contains(&field_def.name) {
+                    // Load value from base struct
+                    self.emit_push_reg(base_reg);
+                    if field_def.offset > 0 {
+                        self.emit_constant(field_def.offset as u64);
+                        self.emit_add();
+                    }
+                    self.emit_heap_load64();
+
+                    // Store to new struct
+                    let value_reg = self.next_local_reg;
+                    self.next_local_reg += 1;
+                    self.emit_pop_reg(value_reg);
+
+                    self.emit_push_reg(temp_reg);
+                    if field_def.offset > 0 {
+                        self.emit_constant(field_def.offset as u64);
+                        self.emit_add();
+                    }
+                    self.emit_push_reg(value_reg);
+                    self.emit_heap_store64();
+                }
+            }
+        }
+
+        // struct address is already on stack from the DUP earlier
+
+        Ok(())
+    }
+
+    /// Compile tuple struct expression: Position(0, 0, 0)
+    fn compile_tuple_struct_expr(&mut self, struct_name: &str, struct_def: &super::StructDef, args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>) -> Result<(), CompileError> {
+        // Handle zero-sized tuple structs
+        if struct_def.size == 0 {
+            self.emit_zero();
+            return Ok(());
+        }
+
+        // Verify argument count matches field count
+        if args.len() != struct_def.fields.len() {
+            return Err(CompileError(format!(
+                "Tuple struct {} expects {} fields, got {}",
+                struct_name, struct_def.fields.len(), args.len()
+            )));
+        }
+
+        // Allocate memory
+        self.emit_constant(struct_def.size as u64);
+        self.emit_heap_alloc();
+
+        // Store in temp register
+        let temp_reg = self.next_local_reg;
+        self.next_local_reg += 1;
+        self.emit_dup();
+        self.emit_pop_reg(temp_reg);
+
+        // Write each field by position
+        for (i, arg) in args.iter().enumerate() {
+            let offset = i * 8;
+
+            // Push base address + offset
+            self.emit_push_reg(temp_reg);
+            if offset > 0 {
+                self.emit_constant(offset as u64);
+                self.emit_add();
+            }
+
+            // Compile argument value
+            self.compile_expr(arg)?;
+
+            // Store
+            self.emit_heap_store64();
+        }
+
+        Ok(())
+    }
+
+    /// Compile field access expression: p.x or tuple.0
+    fn compile_field_access(&mut self, field_expr: &syn::ExprField) -> Result<(), CompileError> {
+        // Check if this is tuple indexing (t.0, t.1, etc.)
+        if let syn::Member::Unnamed(index) = &field_expr.member {
+            // Try to detect if base is a tuple
+            if self.is_tuple_expr(&field_expr.base) {
+                return self.compile_tuple_index(field_expr, index.index as usize);
+            }
+        }
+
+        // Compile base expression (pushes struct/tuple address)
+        self.compile_expr(&field_expr.base)?;
+
+        // Get field name
+        let field_name = match &field_expr.member {
+            syn::Member::Named(ident) => ident.to_string(),
+            syn::Member::Unnamed(index) => index.index.to_string(),
+        };
+
+        // Determine struct type from base expression
+        let struct_name = self.infer_struct_type(&field_expr.base)?;
+
+        // Look up struct definition
+        let struct_def = self.struct_defs.get(&struct_name)
+            .ok_or_else(|| CompileError(format!("Unknown struct: {}", struct_name)))?;
+
+        // Get field offset
+        let offset = struct_def.get_field_offset(&field_name)
+            .ok_or_else(|| CompileError(format!("Unknown field: {}.{}", struct_name, field_name)))?;
+
+        // Add offset to base address
+        if offset > 0 {
+            self.emit_constant(offset as u64);
+            self.emit_add();
+        }
+
+        // Load value from heap
+        self.emit_heap_load64();
+
+        Ok(())
+    }
+
+    /// Check if expression is a tuple
+    fn is_tuple_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    matches!(self.get_var_type(&name), Some(super::VarType::Tuple(_)))
+                } else {
+                    false
+                }
+            }
+            Expr::Tuple(_) => true,
+            Expr::Paren(paren) => self.is_tuple_expr(&paren.expr),
+            // Nested field access - check if the result type is a tuple
+            Expr::Field(field) => {
+                if let syn::Member::Unnamed(idx) = &field.member {
+                    if let Some(elem_type) = self.get_tuple_element_type(&field.base, idx.index as usize) {
+                        return matches!(elem_type, super::VarType::Tuple(_));
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Get tuple element type at given index
+    fn get_tuple_element_type(&self, expr: &Expr, index: usize) -> Option<super::VarType> {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if let Some(super::VarType::Tuple(elems)) = self.get_var_type(&name) {
+                        return elems.get(index).cloned();
+                    }
+                }
+                None
+            }
+            Expr::Tuple(tuple) => {
+                // Infer type from tuple literal element
+                if let Some(elem) = tuple.elems.iter().nth(index) {
+                    Some(self.infer_expr_type(elem))
+                } else {
+                    None
+                }
+            }
+            Expr::Paren(paren) => self.get_tuple_element_type(&paren.expr, index),
+            Expr::Field(field) => {
+                // Nested field access: (t.0).1
+                if let syn::Member::Unnamed(idx) = &field.member {
+                    if let Some(super::VarType::Tuple(inner_elems)) = self.get_tuple_element_type(&field.base, idx.index as usize) {
+                        return inner_elems.get(index).cloned();
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Get full tuple type from expression
+    fn get_tuple_type(&self, expr: &Expr) -> Option<Vec<super::VarType>> {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if let Some(super::VarType::Tuple(elems)) = self.get_var_type(&name) {
+                        return Some(elems);
+                    }
+                }
+                None
+            }
+            Expr::Tuple(tuple) => {
+                Some(tuple.elems.iter().map(|e| self.infer_expr_type(e)).collect())
+            }
+            Expr::Paren(paren) => self.get_tuple_type(&paren.expr),
+            Expr::Field(field) => {
+                // Nested: get the tuple element type and if it's a tuple, return its elements
+                if let syn::Member::Unnamed(idx) = &field.member {
+                    if let Some(super::VarType::Tuple(inner)) = self.get_tuple_element_type(&field.base, idx.index as usize) {
+                        return Some(inner);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Infer type of an expression (simplified version for tuple elements)
+    fn infer_expr_type(&self, expr: &Expr) -> super::VarType {
+        match expr {
+            Expr::Lit(lit) => {
+                match &lit.lit {
+                    syn::Lit::Str(_) | syn::Lit::ByteStr(_) => super::VarType::String,
+                    syn::Lit::Bool(_) => super::VarType::Bool,
+                    _ => super::VarType::Integer,
+                }
+            }
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    self.get_var_type(&name).unwrap_or(super::VarType::Integer)
+                } else {
+                    super::VarType::Integer
+                }
+            }
+            Expr::Tuple(tuple) => {
+                let elems: Vec<super::VarType> = tuple.elems.iter()
+                    .map(|e| self.infer_expr_type(e))
+                    .collect();
+                super::VarType::Tuple(elems)
+            }
+            Expr::Array(_) | Expr::Repeat(_) => super::VarType::Vector,
+            Expr::Paren(paren) => self.infer_expr_type(&paren.expr),
+            _ => super::VarType::Integer,
+        }
+    }
+
+    /// Compile tuple index expression: t.0, t.1, or nested t.0.1
+    fn compile_tuple_index(&mut self, field_expr: &syn::ExprField, index: usize) -> Result<(), CompileError> {
+        // Get tuple type to calculate proper offset
+        let tuple_type = self.get_tuple_type(&field_expr.base);
+
+        // Compile base expression (pushes tuple address)
+        self.compile_expr(&field_expr.base)?;
+
+        // Calculate offset based on element types
+        let offset = if let Some(elems) = &tuple_type {
+            // Sum of aligned sizes of elements before index
+            elems.iter().take(index).map(|t| t.aligned_size()).sum()
+        } else {
+            // Fallback to 8 bytes per element
+            index * 8
+        };
+
+        // Add offset to base address
+        if offset > 0 {
+            self.emit_constant(offset as u64);
+            self.emit_add();
+        }
+
+        // Load value from heap
+        self.emit_heap_load64();
+
+        Ok(())
+    }
+
+    /// Infer struct type from expression
+    fn infer_struct_type(&self, expr: &Expr) -> Result<String, CompileError> {
+        match expr {
+            Expr::Path(path) => {
+                if path.path.segments.len() == 1 {
+                    let name = path.path.segments[0].ident.to_string();
+                    if let Some(super::VarType::Struct(struct_name)) = self.get_var_type(&name) {
+                        return Ok(struct_name);
+                    }
+                }
+                Err(CompileError(format!("Cannot infer struct type from variable '{}'",
+                    path.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))))
+            }
+            Expr::Field(_field) => {
+                // Nested field access - for now, we don't support nested structs returning struct types
+                // This would need to be extended to track field types
+                Err(CompileError("Nested struct field access not yet supported".to_string()))
+            }
+            Expr::Struct(expr_struct) => {
+                // Direct struct literal - return its type
+                let struct_name = expr_struct.path.segments.iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                Ok(struct_name)
+            }
+            Expr::Paren(paren) => {
+                // Parenthesized expression - check inner
+                self.infer_struct_type(&paren.expr)
+            }
+            _ => Err(CompileError("Cannot infer struct type from expression".to_string())),
+        }
+    }
+
+    // =========================================================================
+    // Tuple Operations
+    // =========================================================================
+
+    /// Compile tuple literal expression: (), (a,), (a, b), (a, b, c)
+    fn compile_tuple_expr(&mut self, tuple: &syn::ExprTuple) -> Result<(), CompileError> {
+        let num_elems = tuple.elems.len();
+
+        // Empty tuple () - just return 0
+        if num_elems == 0 {
+            self.emit_zero();
+            return Ok(());
+        }
+
+        // Allocate memory: num_elems * 8 bytes
+        let size = num_elems * 8;
+        self.emit_constant(size as u64);
+        self.emit_heap_alloc();
+
+        // Store in temp register to preserve across element writes
+        let temp_reg = self.next_local_reg;
+        self.next_local_reg += 1;
+        self.emit_dup();  // Keep address on stack for return
+        self.emit_pop_reg(temp_reg);
+
+        // Write each element
+        for (i, elem) in tuple.elems.iter().enumerate() {
+            let offset = i * 8;
+
+            // Push base address + offset
+            self.emit_push_reg(temp_reg);
+            if offset > 0 {
+                self.emit_constant(offset as u64);
+                self.emit_add();
+            }
+
+            // Compile element value
+            self.compile_expr(elem)?;
+
+            // Store: [addr, value] -> []
+            self.emit_heap_store64();
+        }
+
+        // Tuple address is already on stack from the DUP earlier
+        Ok(())
     }
 }
