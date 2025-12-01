@@ -92,6 +92,53 @@ pub mod memory {
     pub const STORE64: u8 = 0x67;
 }
 
+/// Vector Operations (Dynamic Arrays)
+/// Supports [expr.array.array], [expr.array.repeat], [expr.array.index.array]
+pub mod vector {
+    /// Create new vector: [capacity, elem_size] -> [vec_addr]
+    pub const VEC_NEW: u8 = 0x80;
+    /// Get length: [vec_addr] -> [len]
+    pub const VEC_LEN: u8 = 0x81;
+    /// Get capacity: [vec_addr] -> [capacity]
+    pub const VEC_CAP: u8 = 0x82;
+    /// Push element: [vec_addr, value] -> []
+    pub const VEC_PUSH: u8 = 0x83;
+    /// Pop element: [vec_addr] -> [value]
+    pub const VEC_POP: u8 = 0x84;
+    /// Get element (arr[i]): [vec_addr, index] -> [value]
+    pub const VEC_GET: u8 = 0x85;
+    /// Set element (arr[i] = x): [vec_addr, index, value] -> []
+    pub const VEC_SET: u8 = 0x86;
+    /// Create with repeat ([val; N]): [value, count, elem_size] -> [vec_addr]
+    pub const VEC_REPEAT: u8 = 0x87;
+    /// Clear vector: [vec_addr] -> []
+    pub const VEC_CLEAR: u8 = 0x88;
+    /// Reserve capacity: [vec_addr, additional] -> []
+    pub const VEC_RESERVE: u8 = 0x89;
+}
+
+/// String Operations
+pub mod string {
+    /// Create new string: [capacity] -> [str_addr]
+    pub const STR_NEW: u8 = 0x90;
+    /// Get length: [str_addr] -> [len]
+    pub const STR_LEN: u8 = 0x91;
+    /// Push byte: [str_addr, byte] -> []
+    pub const STR_PUSH: u8 = 0x92;
+    /// Get byte: [str_addr, index] -> [byte]
+    pub const STR_GET: u8 = 0x93;
+    /// Set byte: [str_addr, index, byte] -> []
+    pub const STR_SET: u8 = 0x94;
+    /// Compare strings: [str1, str2] -> [result]
+    pub const STR_CMP: u8 = 0x95;
+    /// Check equality: [str1, str2] -> [0/1]
+    pub const STR_EQ: u8 = 0x96;
+    /// Hash string: [str_addr] -> [hash]
+    pub const STR_HASH: u8 = 0x97;
+    /// Concatenate: [str1, str2] -> [new_str]
+    pub const STR_CONCAT: u8 = 0x98;
+}
+
 /// Native Calls
 pub mod native {
     pub const NATIVE_CALL: u8 = 0xF0;

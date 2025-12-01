@@ -4,7 +4,7 @@
 
 use syn::{ItemFn, Expr, Stmt, BinOp, UnOp, Pat, FnArg, Lit};
 use std::collections::BTreeMap; // Deterministic ordering!
-use crate::opcodes::{stack, arithmetic, control, native, exec};
+use crate::opcodes::{stack, arithmetic, control, native, exec, vector};
 use crate::crypto::OpcodeTable;
 use crate::mba::MbaTransformer;
 use crate::substitution::{
@@ -31,6 +31,9 @@ enum VarLocation {
     InputOffset(usize),
     /// Register index (for local variables)
     Register(u8),
+    /// Array stored in register (register holds heap address)
+    /// Contains: register index, element size (1, 2, 4, or 8 bytes)
+    Array(u8, u8),
 }
 
 /// Loop context for break/continue support
@@ -448,6 +451,11 @@ impl Compiler {
                             self.emit_op(stack::PUSH_REG);
                             self.emit(reg);
                         }
+                        Some(VarLocation::Array(reg, _elem_size)) => {
+                            // Push array address (stored in register) to stack
+                            self.emit_op(stack::PUSH_REG);
+                            self.emit(reg);
+                        }
                         None => {
                             return Err(CompileError(format!("Unknown variable: {}", name)));
                         }
@@ -716,6 +724,24 @@ impl Compiler {
                 self.emit(0);
             }
 
+            // Array literal: [1, 2, 3]
+            // [expr.array.array]
+            Expr::Array(array) => {
+                self.compile_array_literal(&array.elems)?;
+            }
+
+            // Repeat syntax: [0; N]
+            // [expr.array.repeat]
+            Expr::Repeat(repeat) => {
+                self.compile_array_repeat(&repeat.expr, &repeat.len)?;
+            }
+
+            // Index expression: arr[i]
+            // [expr.array.index.array]
+            Expr::Index(index) => {
+                self.compile_index_expr(&index.expr, &index.index)?;
+            }
+
             _ => {
                 return Err(CompileError(format!(
                     "Unsupported expression type: {:?}",
@@ -919,8 +945,14 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile simple assignment: x = expr
+    /// Compile simple assignment: x = expr or arr[i] = expr
     fn compile_assignment(&mut self, target: &Expr, value: &Expr) -> Result<(), CompileError> {
+        // Check if this is an index assignment: arr[i] = value
+        if let Expr::Index(index) = target {
+            return self.compile_index_assignment(&index.expr, &index.index, value);
+        }
+
+        // Regular variable assignment
         // Compile the value
         self.compile_expr(value)?;
 
@@ -929,7 +961,7 @@ impl Compiler {
             if path.path.segments.len() == 1 {
                 let name = path.path.segments[0].ident.to_string();
                 match self.get_var_location(&name) {
-                    Some(VarLocation::Register(reg)) => {
+                    Some(VarLocation::Register(reg)) | Some(VarLocation::Array(reg, _)) => {
                         self.emit_op(stack::POP_REG);
                         self.emit(reg);
                     }
@@ -944,7 +976,7 @@ impl Compiler {
                 return Err(CompileError("Complex paths not supported in assignment".to_string()));
             }
         } else {
-            return Err(CompileError("Only simple variable assignment supported".to_string()));
+            return Err(CompileError("Only simple variable or index assignment supported".to_string()));
         }
 
         Ok(())
@@ -958,6 +990,7 @@ impl Compiler {
                 let name = path.path.segments[0].ident.to_string();
                 match self.get_var_location(&name) {
                     Some(VarLocation::Register(reg)) => (name, reg),
+                    Some(VarLocation::Array(reg, _)) => (name, reg),
                     Some(VarLocation::InputOffset(_)) => {
                         return Err(CompileError("Cannot assign to function argument".to_string()));
                     }
@@ -998,6 +1031,81 @@ impl Compiler {
         self.emit_op(stack::POP_REG);
         self.emit(reg);
 
+        Ok(())
+    }
+
+    // =========================================================================
+    // Array Expression Compilation
+    // =========================================================================
+
+    /// Compile array literal: [1, 2, 3]
+    /// [expr.array.array]
+    ///
+    /// Generates: VEC_NEW + VEC_PUSH for each element
+    /// Result: array address on stack
+    fn compile_array_literal(&mut self, elems: &syn::punctuated::Punctuated<Expr, syn::token::Comma>) -> Result<(), CompileError> {
+        let count = elems.len();
+        if count == 0 {
+            // Empty array: just create with capacity 0
+            self.emit_constant(0);  // capacity
+            self.emit_constant(8);  // elem_size (default u64)
+            self.emit_op(vector::VEC_NEW);
+            return Ok(());
+        }
+
+        // Create vector with capacity = element count
+        // Default element size is 8 (u64) - VM works with 64-bit values
+        self.emit_constant(count as u64);  // capacity
+        self.emit_constant(8);              // elem_size = 8 bytes (u64)
+        self.emit_op(vector::VEC_NEW);      // -> [vec_addr]
+
+        // Push each element
+        for elem in elems.iter() {
+            self.emit_op(stack::DUP);       // [vec_addr, vec_addr]
+            self.compile_expr(elem)?;       // [vec_addr, vec_addr, value]
+            self.emit_op(vector::VEC_PUSH); // [vec_addr]
+        }
+
+        // vec_addr remains on stack
+        Ok(())
+    }
+
+    /// Compile array repeat: [value; count]
+    /// [expr.array.repeat]
+    ///
+    /// Generates: VEC_REPEAT opcode
+    /// Result: array address on stack
+    fn compile_array_repeat(&mut self, value: &Expr, len: &Expr) -> Result<(), CompileError> {
+        // Stack order for VEC_REPEAT: [value, count, elem_size] -> [vec_addr]
+        self.compile_expr(value)?;          // [value]
+        self.compile_expr(len)?;            // [value, count]
+        self.emit_constant(8);              // [value, count, 8] - elem_size = 8 (u64)
+        self.emit_op(vector::VEC_REPEAT);   // [vec_addr]
+        Ok(())
+    }
+
+    /// Compile index expression: arr[i]
+    /// [expr.array.index.array]
+    ///
+    /// Generates: VEC_GET opcode
+    /// Result: element value on stack
+    fn compile_index_expr(&mut self, base: &Expr, index: &Expr) -> Result<(), CompileError> {
+        // Get array address
+        self.compile_expr(base)?;           // [vec_addr]
+        // Get index
+        self.compile_expr(index)?;          // [vec_addr, index]
+        // Get element
+        self.emit_op(vector::VEC_GET);      // [value]
+        Ok(())
+    }
+
+    /// Compile index assignment: arr[i] = value
+    fn compile_index_assignment(&mut self, base: &Expr, index: &Expr, value: &Expr) -> Result<(), CompileError> {
+        // Stack order for VEC_SET: [vec_addr, index, value] -> []
+        self.compile_expr(base)?;           // [vec_addr]
+        self.compile_expr(index)?;          // [vec_addr, index]
+        self.compile_expr(value)?;          // [vec_addr, index, value]
+        self.emit_op(vector::VEC_SET);      // []
         Ok(())
     }
 
