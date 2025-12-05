@@ -288,6 +288,17 @@ impl Compiler {
                 syn::Stmt::Local(local) => {
                     self.compile_local(local)?;
                 }
+                syn::Stmt::Macro(stmt_macro) => {
+                    // Macro calls like println!, log::error!, etc. are not supported
+                    let macro_name = stmt_macro.mac.path.segments.iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    return Err(CompileError(format!(
+                        "Macro calls not supported in VM: {}!(...). Use a native function wrapper instead.",
+                        macro_name
+                    )));
+                }
                 _ => return Err(CompileError("Unsupported statement type".to_string())),
             }
         }
@@ -333,6 +344,16 @@ impl Compiler {
                 syn::Stmt::Local(local) => {
                     self.compile_local(local)?;
                 }
+                syn::Stmt::Macro(stmt_macro) => {
+                    let macro_name = stmt_macro.mac.path.segments.iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    return Err(CompileError(format!(
+                        "Macro calls not supported in VM: {}!(...). Use a native function wrapper instead.",
+                        macro_name
+                    )));
+                }
                 _ => return Err(CompileError("Unsupported statement type".to_string())),
             }
         }
@@ -358,6 +379,16 @@ impl Compiler {
                 syn::Stmt::Local(local) => {
                     self.compile_local(local)?;
                     self.emit_zero();  // let binding produces unit
+                }
+                syn::Stmt::Macro(stmt_macro) => {
+                    let macro_name = stmt_macro.mac.path.segments.iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    return Err(CompileError(format!(
+                        "Macro calls not supported in VM: {}!(...). Use a native function wrapper instead.",
+                        macro_name
+                    )));
                 }
                 _ => return Err(CompileError("Unsupported statement type".to_string())),
             }

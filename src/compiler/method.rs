@@ -351,7 +351,34 @@ impl Compiler {
             }
 
             _ => {
-                return Err(CompileError(format!("Unknown method: {}", method_name)));
+                // =========================================================
+                // Unknown method: treat as native call
+                // Compile receiver and args, register call, emit NATIVE_CALL
+                // =========================================================
+
+                // 1. Compile receiver (will be passed as first argument)
+                self.compile_expr(receiver)?;
+
+                // 2. Compile all arguments
+                for arg in args {
+                    self.compile_expr(arg)?;
+                }
+
+                // 3. Register this method call and get its index
+                let index = self.native_collector.register_method(method_call)?;
+
+                // 4. Emit NATIVE_CALL opcode
+                if index > 255 {
+                    return Err(CompileError("Too many native calls (max 256)".to_string()));
+                }
+
+                // arg_count = receiver + args
+                let arg_count = args.len() + 1;
+                if arg_count > 255 {
+                    return Err(CompileError("Too many arguments for native call (max 255)".to_string()));
+                }
+
+                self.emit_native_call(index as u8, arg_count as u8);
             }
         }
 

@@ -173,15 +173,33 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Use instruction substitution for Standard and Paranoid levels
     let use_mba = protection_level == ProtectionLevel::Paranoid;
     let use_substitution = protection_level != ProtectionLevel::Debug;
-    let raw_bytecode = compiler::compile_function_full(&input, use_mba, use_substitution);
+    let compile_result = compiler::compile_function_with_natives(&input, use_mba, use_substitution);
 
-    let raw_bytecode = match raw_bytecode {
-        Ok(bc) => bc,
+    let (raw_bytecode, native_collector) = match compile_result {
+        Ok(result) => result,
         Err(e) => {
             return syn::Error::new_spanned(&input, format!("VM compilation error: {}", e))
                 .to_compile_error()
                 .into();
         }
+    };
+
+    // Generate native call wrappers and table if there are any native calls
+    let has_native_calls = native_collector.has_calls();
+    let native_wrappers = if has_native_calls {
+        native_collector.generate_wrappers()
+    } else {
+        quote! {}
+    };
+    let native_table = if has_native_calls {
+        native_collector.generate_table()
+    } else {
+        quote! { let __native_table: &[fn(&[u64]) -> u64] = &[]; }
+    };
+    let native_conversion_helper = if has_native_calls {
+        compiler::native_call::NativeCallCollector::generate_conversion_helper()
+    } else {
+        quote! {}
     };
 
     // Determine polymorphic level based on protection level
@@ -217,9 +235,18 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                     // DEBUG MODE: Plaintext bytecode (no polymorphism)
                     static BYTECODE: [u8; #bytecode_len] = [#(#bytecode_bytes),*];
 
+                    // Native call support: type conversion helper
+                    #native_conversion_helper
+
+                    // Native call support: wrapper functions for external calls
+                    #native_wrappers
+
+                    // Native call support: function table
+                    #native_table
+
                     let input_buffer: Vec<u8> = { #input_prep };
 
-                    let result = aegis_vm::execute(&BYTECODE, &input_buffer)
+                    let result = aegis_vm::execute_with_native_table(&BYTECODE, &input_buffer, &__native_table)
                         .expect("VM execution failed");
 
                     #output_extract
@@ -267,7 +294,7 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                     for i in 0..#num_regions {
                         let start = REGION_STARTS[i] as usize;
                         let end = REGION_ENDS[i] as usize;
-                        let region_data = &decrypted[start..end];
+                        let region_data = &bytecode[start..end];
                         let computed = aegis_vm::compute_hash(region_data);
                         if computed != REGION_HASHES[i] {
                             panic!("E05:{:02x}", i);
@@ -278,10 +305,10 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                 quote! {}
             };
 
+            // Generate code that works in both std and no_std environments
+            // The user's crate decides which path to use via cfg attributes
             quote! {
                 #fn_vis fn #fn_name #fn_generics(#fn_inputs) #fn_output {
-                    use std::sync::OnceLock;
-
                     // Encrypted bytecode package (compile-time encrypted)
                     static ENCRYPTED: [u8; #ciphertext_len] = [#(#ciphertext_bytes),*];
                     static NONCE: [u8; 12] = [#(#nonce_bytes),*];
@@ -289,39 +316,80 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                     static BUILD_ID: u64 = #build_id;
                     static INTEGRITY_HASH: u64 = #integrity_hash;
 
-                    // Decrypt once and cache
-                    static DECRYPTED: OnceLock<Vec<u8>> = OnceLock::new();
+                    // Native call support: type conversion helper
+                    #native_conversion_helper
 
-                    let bytecode = DECRYPTED.get_or_init(|| {
+                    // Native call support: wrapper functions for external calls
+                    #native_wrappers
+
+                    // Native call support: function table
+                    #native_table
+
+                    // Decryption helper - inlined to avoid static caching issues in no_std
+                    #[inline(always)]
+                    fn __aegis_decrypt() -> aegis_vm::VmResult<Vec<u8>> {
                         // Verify build ID matches (E01 = build mismatch)
                         let runtime_build_id = aegis_vm::build_config::BUILD_ID;
                         if BUILD_ID != runtime_build_id {
-                            panic!("E01:{:016x}", BUILD_ID ^ runtime_build_id);
+                            return Err(aegis_vm::VmError::InvalidBytecode);
                         }
 
-                        // Create crypto context and decrypt (E02 = decryption failed)
+                        // Create crypto context and decrypt
                         let seed = aegis_vm::build_config::get_build_seed();
                         let ctx = aegis_vm::CryptoContext::new(seed);
                         let decrypted = ctx.decrypt(&ENCRYPTED, &NONCE, &TAG)
-                            .expect("E02");
+                            .map_err(|_| aegis_vm::VmError::InvalidBytecode)?;
 
-                        // Verify integrity hash (E03 = integrity check failed)
+                        // Verify integrity hash
                         let computed_hash = aegis_vm::compute_hash(&decrypted);
                         if computed_hash != INTEGRITY_HASH {
-                            panic!("E03:{:016x}", computed_hash ^ INTEGRITY_HASH);
+                            return Err(aegis_vm::VmError::InvalidBytecode);
                         }
+
+                        Ok(decrypted)
+                    }
+
+                    // For std environments: cache the decrypted bytecode
+                    #[cfg(feature = "std")]
+                    {
+                        use std::sync::OnceLock;
+                        static DECRYPTED: OnceLock<Vec<u8>> = OnceLock::new();
+
+                        let bytecode = DECRYPTED.get_or_init(|| {
+                            __aegis_decrypt().expect("E02")
+                        });
 
                         #region_check
 
-                        decrypted
-                    });
+                        let input_buffer: Vec<u8> = { #input_prep };
 
-                    let input_buffer: Vec<u8> = { #input_prep };
+                        let result = aegis_vm::execute_with_native_table(bytecode, &input_buffer, &__native_table)
+                            .expect("E04");
 
-                    let result = aegis_vm::execute(bytecode, &input_buffer)
-                        .expect("E04");
+                        #output_extract
+                    }
 
-                    #output_extract
+                    // For no_std environments: use spin::Once for caching
+                    #[cfg(not(feature = "std"))]
+                    {
+                        extern crate alloc;
+                        use alloc::vec::Vec;
+                        use spin::Once;
+                        static DECRYPTED: Once<Vec<u8>> = Once::new();
+
+                        let bytecode = DECRYPTED.call_once(|| {
+                            __aegis_decrypt().unwrap_or_else(|_| loop {})
+                        });
+
+                        #region_check
+
+                        let input_buffer: Vec<u8> = { #input_prep };
+
+                        let result = aegis_vm::execute_with_native_table(bytecode, &input_buffer, &__native_table)
+                            .unwrap_or_else(|_| loop {});
+
+                        #output_extract
+                    }
                 }
             }
         }

@@ -455,6 +455,14 @@ impl Compiler {
         self.emit_u16(offset);
     }
 
+    /// Emit NATIVE_CALL: Call external function by index
+    /// Format: NATIVE_CALL <func_index: u8> <arg_count: u8>
+    pub(crate) fn emit_native_call(&mut self, func_index: u8, arg_count: u8) {
+        self.emit_op(native::NATIVE_CALL);
+        self.emit(func_index);
+        self.emit(arg_count);
+    }
+
     // =========================================================================
     // Control Flow
     // =========================================================================

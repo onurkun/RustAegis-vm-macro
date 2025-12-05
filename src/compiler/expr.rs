@@ -180,9 +180,18 @@ impl Compiler {
                         self.emit_sub();
                     }
                     UnOp::Not(_) => {
-                        // For booleans: !x = 1 - x (flip 0<->1)
-                        // For integers: !x = bitwise NOT
-                        self.emit_not();
+                        // Check if operand is boolean type
+                        let is_bool = self.is_bool_expr(&unary.expr);
+                        if is_bool {
+                            // For booleans: !x = (x == 0) -> 1 if x==0, 0 otherwise
+                            // Implemented as: 1 - (x != 0) = 1 - (x & 1) for safe bool
+                            // Or simply: x XOR 1 (flips lowest bit)
+                            self.emit_constant(1);
+                            self.emit_xor();
+                        } else {
+                            // For integers: !x = bitwise NOT
+                            self.emit_not();
+                        }
                     }
                     UnOp::Deref(_) => {
                         // *x - dereference pointer (load from heap)
@@ -376,7 +385,7 @@ impl Compiler {
             // Function call: func(args) or tuple struct: Position(0, 0)
             // =========================================================
             Expr::Call(call) => {
-                // Check for built-in constructors or tuple struct
+                // Check for built-in constructors or tuple struct first
                 if let Expr::Path(path) = &*call.func {
                     let func_name = path.path.segments.iter()
                         .map(|s| s.ident.to_string())
@@ -418,10 +427,34 @@ impl Compiler {
                                     return Ok(());
                                 }
                             }
+                            // Fall through to native call handling
                         }
                     }
                 }
-                return Err(CompileError("Function calls not yet supported (use native calls)".to_string()));
+
+                // =========================================================
+                // Native Call: External function call
+                // Compile arguments, register call, emit NATIVE_CALL
+                // =========================================================
+
+                // 1. Compile all arguments (push to stack in order)
+                for arg in &call.args {
+                    self.compile_expr(arg)?;
+                }
+
+                // 2. Register this call and get its index
+                let index = self.native_collector.register_call(call)?;
+
+                // 3. Emit NATIVE_CALL opcode
+                if index > 255 {
+                    return Err(CompileError("Too many native calls (max 256)".to_string()));
+                }
+                let arg_count = call.args.len();
+                if arg_count > 255 {
+                    return Err(CompileError("Too many arguments for native call (max 255)".to_string()));
+                }
+
+                self.emit_native_call(index as u8, arg_count as u8);
             }
 
             // =========================================================
