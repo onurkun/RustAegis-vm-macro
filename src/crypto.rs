@@ -97,50 +97,10 @@ fn read_shared_seed() -> Option<[u8; 32]> {
     None
 }
 
-/// Generate cryptographically random seed (for testing only)
-#[allow(dead_code)]
-fn generate_random_seed() -> [u8; 32] {
-    use std::fs::File;
-    use std::io::Read;
-    use std::time::{SystemTime, UNIX_EPOCH};
+// NOTE: generate_random_seed() removed - not used in production.
+// Build seed is always read from shared file written by aegis_vm build.rs
 
-    let mut seed = [0u8; 32];
-
-    // Try /dev/urandom first (Unix)
-    if let Ok(mut file) = File::open("/dev/urandom") {
-        if file.read_exact(&mut seed).is_ok() {
-            return seed;
-        }
-    }
-
-    // Fallback: combine multiple entropy sources
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-
-    let mut entropy = Vec::new();
-    entropy.extend_from_slice(&timestamp.as_nanos().to_le_bytes());
-    entropy.extend_from_slice(&std::process::id().to_le_bytes());
-
-    // Add some environment entropy
-    if let Ok(pwd) = std::env::var("PWD") {
-        entropy.extend_from_slice(pwd.as_bytes());
-    }
-    if let Ok(user) = std::env::var("USER") {
-        entropy.extend_from_slice(user.as_bytes());
-    }
-
-    // Hash for uniform distribution using HMAC
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&entropy)
-        .expect("HMAC can take any size key");
-    mac.update(b"random-seed-derive");
-    let result = mac.finalize();
-    let mut final_seed = [0u8; 32];
-    final_seed.copy_from_slice(&result.into_bytes());
-    final_seed
-}
-
-/// Derive encryption key from build seed
+/// Derive encryption key from build seed (legacy HMAC method, kept for non-WBC fallback)
 pub fn derive_key(build_seed: &[u8; 32], context: &[u8]) -> [u8; KEY_SIZE] {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(build_seed)
         .expect("HMAC can take any size key");
