@@ -12,7 +12,6 @@ pub const NONCE_SIZE: usize = 12;
 pub const TAG_SIZE: usize = 16;
 
 // Domain separation strings (same as runtime)
-const KEY_DOMAIN: &[u8] = b"anticheat-vm-key-v1";
 const NONCE_DOMAIN: &[u8] = b"anticheat-vm-nonce-v1";
 const BUILDID_DOMAIN: &[u8] = b"anticheat-vm-build-id-v1";
 const OPCODE_SHUFFLE_DOMAIN: &[u8] = b"opcode-shuffle-v1";
@@ -99,19 +98,7 @@ fn read_shared_seed() -> Option<[u8; 32]> {
 
 // NOTE: generate_random_seed() removed - not used in production.
 // Build seed is always read from shared file written by aegis_vm build.rs
-
-/// Derive encryption key from build seed (legacy HMAC method, kept for non-WBC fallback)
-pub fn derive_key(build_seed: &[u8; 32], context: &[u8]) -> [u8; KEY_SIZE] {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(build_seed)
-        .expect("HMAC can take any size key");
-    mac.update(context);
-    mac.update(KEY_DOMAIN);
-
-    let result = mac.finalize();
-    let mut key = [0u8; KEY_SIZE];
-    key.copy_from_slice(&result.into_bytes()[..KEY_SIZE]);
-    key
-}
+// NOTE: derive_key() removed - WBC key derivation is now used instead.
 
 /// Derive nonce from build seed and counter
 pub fn derive_nonce(build_seed: &[u8; 32], counter: u64) -> [u8; NONCE_SIZE] {
@@ -308,8 +295,100 @@ impl OpcodeTable {
     }
 }
 
+/// Read opcode table from shared file written by build.rs
+/// This is the Single Source of Truth - we read what build.rs generated
+fn read_shared_opcode_table() -> Option<[u8; 256]> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let mut all_candidates: Vec<PathBuf> = Vec::new();
+
+    // Try CARGO_TARGET_DIR if set (highest priority)
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        all_candidates.push(PathBuf::from(&target_dir).join(".anticheat_opcode_table"));
+    }
+
+    // Try OUT_DIR based path (works during build)
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let path = PathBuf::from(&out_dir);
+        for ancestor in path.ancestors() {
+            if ancestor.file_name().is_some_and(|n| n == "target") {
+                all_candidates.push(ancestor.join(".anticheat_opcode_table"));
+                break;
+            }
+        }
+    }
+
+    // Try CARGO_MANIFEST_DIR based path (works for proc-macros)
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let path = PathBuf::from(&manifest_dir);
+        for ancestor in path.ancestors() {
+            let target_path = ancestor.join("target/.anticheat_opcode_table");
+            if target_path.exists() {
+                all_candidates.push(target_path);
+                break;
+            }
+        }
+    }
+
+    // Common relative paths as fallback
+    all_candidates.extend([
+        PathBuf::from("target/.anticheat_opcode_table"),
+        PathBuf::from("../target/.anticheat_opcode_table"),
+        PathBuf::from("../../target/.anticheat_opcode_table"),
+        PathBuf::from("../../../target/.anticheat_opcode_table"),
+        PathBuf::from("../../../../target/.anticheat_opcode_table"),
+    ]);
+
+    for path in all_candidates {
+        if let Ok(hex_str) = fs::read_to_string(&path) {
+            if let Ok(bytes) = hex::decode(hex_str.trim()) {
+                if bytes.len() == 256 {
+                    let mut table = [0u8; 256];
+                    table.copy_from_slice(&bytes);
+                    return Some(table);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Get the opcode table for current build
+/// CRITICAL: Reads from shared file written by build.rs (Single Source of Truth)
+/// Falls back to generation only if file not found (should not happen in normal builds)
 pub fn get_opcode_table() -> OpcodeTable {
+    // First try to read from shared file (the correct way)
+    if let Some(encode) = read_shared_opcode_table() {
+        // Derive MBA seed from build seed (this part is still needed)
+        let seed = get_build_seed();
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&seed)
+            .expect("HMAC can take any size key");
+        mac.update(OPCODE_SHUFFLE_DOMAIN);
+        let shuffle_key: [u8; 32] = mac.finalize().into_bytes().into();
+
+        // Derive MBA seed the same way as OpcodeTable::generate
+        let mut rng_state = shuffle_key;
+        for i in (1..254).rev() {
+            let mut mac = <HmacSha256 as Mac>::new_from_slice(&rng_state)
+                .expect("HMAC can take any size key");
+            mac.update(&(i as u32).to_le_bytes());
+            rng_state = mac.finalize().into_bytes().into();
+        }
+
+        let mba_seed = u64::from_le_bytes([
+            rng_state[0], rng_state[1], rng_state[2], rng_state[3],
+            rng_state[4], rng_state[5], rng_state[6], rng_state[7],
+        ]);
+
+        return OpcodeTable { encode, seed: mba_seed };
+    }
+
+    // Fallback: generate ourselves (should not happen if build order is correct)
+    // This maintains backwards compatibility but is not the preferred path
+    eprintln!("WARNING: vm-macro: Opcode table file not found, generating locally. \
+               This may cause opcode mismatch if build.rs uses different algorithm!");
     let seed = get_build_seed();
     OpcodeTable::generate(&seed)
 }

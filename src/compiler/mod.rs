@@ -41,6 +41,7 @@ impl std::fmt::Display for CompileError {
 }
 
 /// Variable type for proper method dispatch
+#[allow(dead_code)] // IntegerSized reserved for future packed storage optimization
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum VarType {
     /// Integer (u8, u16, u32, u64, i8, i16, i32, i64) with optional size in bytes
@@ -59,6 +60,7 @@ pub(crate) enum VarType {
     Tuple(Vec<VarType>),
 }
 
+#[allow(dead_code)] // Reserved for future packed storage optimization
 impl VarType {
     /// Get the size in bytes for this type (for tuple offset calculation)
     /// All types are stored as 8 bytes for alignment, but this tracks logical size

@@ -6,9 +6,9 @@ mod tables;
 mod generator;
 mod cipher;
 
-pub use tables::{WhiteboxTables, WhiteboxTablesLite};
+pub use tables::WhiteboxTables;
 pub use cipher::whitebox_encrypt;
-pub use generator::{generate_tables, generate_tables_lite};
+pub use generator::generate_tables;
 
 /// AES block size in bytes
 pub const AES_BLOCK_SIZE: usize = 16;

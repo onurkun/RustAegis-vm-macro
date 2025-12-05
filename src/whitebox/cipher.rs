@@ -55,6 +55,7 @@ pub fn whitebox_encrypt(block: &mut [u8; AES_BLOCK_SIZE], tables: &WhiteboxTable
 }
 
 /// Encrypt using lightweight tables (slower, smaller footprint)
+#[allow(dead_code)] // Reserved for whitebox_lite feature
 pub fn whitebox_encrypt_lite(block: &mut [u8; AES_BLOCK_SIZE], tables: &WhiteboxTablesLite) {
     let mut state = *block;
 
@@ -86,6 +87,7 @@ pub fn whitebox_encrypt_lite(block: &mut [u8; AES_BLOCK_SIZE], tables: &Whitebox
 /// Decrypt a 16-byte block using whitebox tables
 /// Note: Requires inverse tables which aren't generated in current implementation
 /// For now, this is a placeholder that will be implemented when needed
+#[allow(dead_code)] // Reserved for WBC decryption support
 pub fn whitebox_decrypt(_block: &mut [u8; AES_BLOCK_SIZE], _tables: &WhiteboxTables) {
     // Decryption requires inverse tables (InvSubBytes, InvShiftRows, InvMixColumns)
     // This would need separate table generation for decryption
@@ -155,6 +157,7 @@ fn xor_byte_via_tables(a: u8, b: u8, round: usize, table_base: usize, tables: &W
 }
 
 /// MixColumns transformation (for lite variant)
+#[allow(dead_code)] // Used by whitebox_encrypt_lite
 fn mix_columns(state: &[u8; 16]) -> [u8; 16] {
     let mut result = [0u8; 16];
 
@@ -175,6 +178,7 @@ fn mix_columns(state: &[u8; 16]) -> [u8; 16] {
 }
 
 /// Multiply by 2 in GF(2^8)
+#[allow(dead_code)] // Used by mix_columns
 #[inline]
 fn gf_mul_2(a: u8) -> u8 {
     let mut result = a << 1;
@@ -185,6 +189,7 @@ fn gf_mul_2(a: u8) -> u8 {
 }
 
 /// Multiply by 3 in GF(2^8)
+#[allow(dead_code)] // Used by mix_columns
 #[inline]
 fn gf_mul_3(a: u8) -> u8 {
     gf_mul_2(a) ^ a

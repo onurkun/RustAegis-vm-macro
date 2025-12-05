@@ -8,6 +8,7 @@ use super::{AES_ROUNDS, AES_BLOCK_SIZE};
 /// XOR tables: 9 * 96 * 16 * 16 = 221KB
 /// MBL tables: 9 * 16 * 256 * 4 = 147KB
 /// Total: ~555KB
+#[allow(dead_code)] // Informational constant
 pub const WHITEBOX_TABLE_SIZE: usize = 555_000;
 
 /// T-box: SubBytes + AddRoundKey combined
@@ -51,9 +52,11 @@ pub struct WhiteboxTables {
     pub tbox_last: [[u8; 256]; AES_BLOCK_SIZE],
 
     /// External input encoding (optional)
+    #[allow(dead_code)] // Reserved for external encoding support
     pub input_encoding: Option<Box<[[u8; 256]; AES_BLOCK_SIZE]>>,
 
     /// External output encoding inverse (optional)
+    #[allow(dead_code)] // Reserved for external encoding support
     pub output_encoding_inv: Option<Box<[[u8; 256]; AES_BLOCK_SIZE]>>,
 }
 
@@ -78,6 +81,7 @@ impl WhiteboxTables {
     }
 
     /// Get approximate memory usage
+    #[allow(dead_code)] // Diagnostic method
     pub fn memory_size(&self) -> usize {
         let base = core::mem::size_of::<TBox>()
             + core::mem::size_of::<TyBox>()
@@ -94,6 +98,7 @@ impl WhiteboxTables {
 
 /// Lightweight whitebox tables (T-boxes only, ~40KB)
 /// Provides less protection but smaller footprint
+#[allow(dead_code)] // Reserved for whitebox_lite feature
 #[derive(Clone)]
 pub struct WhiteboxTablesLite {
     /// T-boxes for all rounds
@@ -109,6 +114,7 @@ impl Default for WhiteboxTablesLite {
     }
 }
 
+#[allow(dead_code)] // Reserved for whitebox_lite feature
 impl WhiteboxTablesLite {
     pub fn new() -> Self {
         Self {

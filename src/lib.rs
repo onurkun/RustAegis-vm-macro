@@ -24,6 +24,7 @@ mod integrity;
 mod mba;
 mod opcodes;
 mod polymorphic;
+mod string_obfuscation;
 mod substitution;
 mod value_cryptor;
 mod whitebox;
@@ -269,7 +270,7 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                         let region_data = &decrypted[start..end];
                         let computed = aegis_vm::compute_hash(region_data);
                         if computed != REGION_HASHES[i] {
-                            panic!("VM bytecode tampering detected in region {}", i);
+                            panic!("E05:{:02x}", i);
                         }
                     }
                 }
@@ -292,22 +293,22 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                     static DECRYPTED: OnceLock<Vec<u8>> = OnceLock::new();
 
                     let bytecode = DECRYPTED.get_or_init(|| {
-                        // Verify build ID matches
+                        // Verify build ID matches (E01 = build mismatch)
                         let runtime_build_id = aegis_vm::build_config::BUILD_ID;
                         if BUILD_ID != runtime_build_id {
-                            panic!("VM build ID mismatch: bytecode was compiled with different build");
+                            panic!("E01:{:016x}", BUILD_ID ^ runtime_build_id);
                         }
 
-                        // Create crypto context and decrypt
+                        // Create crypto context and decrypt (E02 = decryption failed)
                         let seed = aegis_vm::build_config::get_build_seed();
                         let ctx = aegis_vm::CryptoContext::new(seed);
                         let decrypted = ctx.decrypt(&ENCRYPTED, &NONCE, &TAG)
-                            .expect("VM bytecode decryption failed - possible tampering");
+                            .expect("E02");
 
-                        // Verify integrity hash (quick check)
+                        // Verify integrity hash (E03 = integrity check failed)
                         let computed_hash = aegis_vm::compute_hash(&decrypted);
                         if computed_hash != INTEGRITY_HASH {
-                            panic!("VM bytecode integrity check failed - tampering detected");
+                            panic!("E03:{:016x}", computed_hash ^ INTEGRITY_HASH);
                         }
 
                         #region_check
@@ -318,7 +319,7 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let input_buffer: Vec<u8> = { #input_prep };
 
                     let result = aegis_vm::execute(bytecode, &input_buffer)
-                        .expect("VM execution failed");
+                        .expect("E04");
 
                     #output_extract
                 }
@@ -423,4 +424,163 @@ fn is_bool_type(ty: &Type) -> bool {
     } else {
         false
     }
+}
+
+/// String obfuscation attribute macro
+///
+/// Encrypts all string literals in a function at compile time.
+/// Each build produces different ciphertext (based on build seed).
+///
+/// ## Usage
+///
+/// ```ignore
+/// use aegis_vm_macro::obfuscate_strings;
+///
+/// #[obfuscate_strings]
+/// fn error_handler(code: u32) -> &'static str {
+///     match code {
+///         1 => "Invalid input",      // Encrypted!
+///         2 => "Access denied",      // Encrypted!
+///         _ => "Unknown error",      // Encrypted!
+///     }
+/// }
+/// ```
+///
+/// ## How It Works
+///
+/// 1. At compile time, all string literals are found and encrypted
+/// 2. Each string gets a unique key derived from: build_seed + string_id
+/// 3. At runtime, strings are decrypted on first use and cached
+/// 4. No plaintext strings appear in the binary
+///
+/// ## Security Features
+///
+/// - **Build-specific**: Same source produces different ciphertext each build
+/// - **Position-dependent**: Same string at different locations = different ciphertext
+/// - **No static keys**: Keys derived from build seed (not in binary)
+/// - **Lazy decryption**: Strings decrypted only when accessed
+///
+/// ## Performance
+///
+/// - First access: ~100ns decryption overhead
+/// - Subsequent access: Zero overhead (cached)
+/// - Memory: Encrypted + decrypted versions both in memory after first use
+///
+/// ## Example Output (in binary)
+///
+/// ```text
+/// // Before: plaintext visible
+/// "VM bytecode decryption failed"
+///
+/// // After: only encrypted bytes visible
+/// [0x4a, 0x7f, 0x2c, 0x91, 0x3e, ...]
+/// ```
+#[proc_macro_attribute]
+pub fn obfuscate_strings(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+
+    // Transform the function, encrypting all string literals
+    let output = string_obfuscation::obfuscate_function(input);
+
+    output.into()
+}
+
+/// Obfuscate a single string literal at compile time
+///
+/// This macro encrypts a string at compile time and decrypts it at runtime.
+/// Use this for individual strings anywhere in your code.
+///
+/// ## Usage
+///
+/// ```ignore
+/// use aegis_vm::aegis_str;
+///
+/// // Basic usage
+/// let secret = aegis_str!("my secret string");
+///
+/// // In panic/expect
+/// panic!("{}", aegis_str!("VM execution failed"));
+/// result.expect(&aegis_str!("Should not fail"));
+///
+/// // In match arms
+/// match error_code {
+///     1 => aegis_str!("Invalid input"),
+///     2 => aegis_str!("Access denied"),
+///     _ => aegis_str!("Unknown error"),
+/// }
+/// ```
+///
+/// ## How It Works
+///
+/// At compile time:
+/// ```text
+/// aegis_str!("secret")
+/// ```
+///
+/// Becomes:
+/// ```text
+/// {
+///     static ENCRYPTED: [u8; 6] = [0x4a, 0x7f, 0x2c, 0x91, 0x3e, 0x8b];
+///     aegis_vm::string_obfuscation::decrypt_static(&ENCRYPTED, 0x1234567890abcdef)
+/// }
+/// ```
+///
+/// ## Security
+///
+/// - String is encrypted with build-seed-derived key
+/// - Different key every build
+/// - No plaintext in binary
+/// - Decrypted on first access, cached thereafter
+/// Internal version for use within aegis_vm crate
+/// Uses `crate::` path instead of `aegis_vm::`
+#[proc_macro]
+pub fn aegis_str_internal(input: TokenStream) -> TokenStream {
+    let lit_str = parse_macro_input!(input as syn::LitStr);
+    let content = lit_str.value();
+
+    // Skip empty strings
+    if content.is_empty() {
+        return quote! { "" }.into();
+    }
+
+    // Generate unique ID and encrypt
+    let string_id = string_obfuscation::generate_string_id(&content, 0);
+    let encrypted = string_obfuscation::encrypt_string(&content, string_id);
+    let encrypted_len = encrypted.len();
+    let encrypted_bytes: Vec<_> = encrypted.iter().map(|b| quote! { #b }).collect();
+
+    let expanded = quote! {
+        {
+            static __AEGIS_ENC: [u8; #encrypted_len] = [#(#encrypted_bytes),*];
+            crate::string_obfuscation::decrypt_static(&__AEGIS_ENC, #string_id)
+        }
+    };
+
+    expanded.into()
+}
+
+#[proc_macro]
+pub fn aegis_str(input: TokenStream) -> TokenStream {
+    let lit_str = parse_macro_input!(input as syn::LitStr);
+    let content = lit_str.value();
+
+    // Skip empty strings
+    if content.is_empty() {
+        return quote! { "" }.into();
+    }
+
+    // Generate unique ID and encrypt
+    let string_id = string_obfuscation::generate_string_id(&content, 0);
+    let encrypted = string_obfuscation::encrypt_string(&content, string_id);
+    let encrypted_len = encrypted.len();
+    let encrypted_bytes: Vec<_> = encrypted.iter().map(|b| quote! { #b }).collect();
+
+    let expanded = quote! {
+        {
+            static __AEGIS_ENC: [u8; #encrypted_len] = [#(#encrypted_bytes),*];
+            aegis_vm::string_obfuscation::decrypt_static(&__AEGIS_ENC, #string_id)
+        }
+    };
+
+    expanded.into()
 }

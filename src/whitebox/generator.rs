@@ -32,6 +32,7 @@ impl SeededRng {
         self.state.wrapping_mul(0x2545f4914f6cdd1d)
     }
 
+    #[allow(dead_code)] // Reserved for future use
     pub fn next_u8(&mut self) -> u8 {
         self.next_u64() as u8
     }
@@ -88,6 +89,7 @@ pub fn generate_tables(key: &[u8; 16], seed: &[u8]) -> WhiteboxTables {
 }
 
 /// Generate lightweight whitebox tables (T-boxes only)
+#[allow(dead_code)] // Reserved for whitebox_lite feature
 pub fn generate_tables_lite(key: &[u8; 16], seed: &[u8]) -> WhiteboxTablesLite {
     let mut tables = WhiteboxTablesLite::new();
     let mut rng = SeededRng::new(seed);
