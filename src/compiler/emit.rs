@@ -8,6 +8,7 @@ use crate::substitution::{
     IncSubstitution, NotSubstitution,
     AndSubstitution, OrSubstitution, ConstantSubstitution, ZeroSubstitution,
     AddSubstitution, SubSubstitution, DeadCodeInsertion,
+    ControlFlowSubstitution,
 };
 
 impl Compiler {
@@ -50,10 +51,29 @@ impl Compiler {
 
     /// Emit jump with fixup
     pub(crate) fn emit_jump(&mut self, opcode: u8, label: &str) {
+        // Opaque predicate injection (~15% chance)
+        if self.opaque_predicates_enabled && self.should_inject_opaque() {
+            let table = self.opcode_table.clone();
+            let encode = |op: u8| table.encode(op);
+            ControlFlowSubstitution::emit_fake_conditional(
+                &mut self.subst,
+                &mut self.bytecode,
+                &encode,
+            );
+        }
+
         self.emit_op(opcode);
         let fixup_pos = self.pos();
         self.emit_u16(0); // Placeholder
         self.fixups.push((fixup_pos, label.to_string()));
+    }
+
+    /// Deterministic check for opaque predicate injection
+    fn should_inject_opaque(&self) -> bool {
+        let entropy = (self.bytecode.len() as u64)
+            .wrapping_mul(0x9E3779B97F4A7C15)
+            .wrapping_add(0xC6A4A7935BD1E995);
+        (entropy % 100) < 15
     }
 
     // =========================================================================

@@ -205,6 +205,8 @@ pub struct Compiler {
     pub(crate) value_cryptor: ValueCryptor,
     /// Enable heavy value encryption
     pub(crate) value_cryptor_enabled: bool,
+    /// Enable opaque predicates injection
+    pub(crate) opaque_predicates_enabled: bool,
 }
 
 impl Compiler {
@@ -246,6 +248,8 @@ impl Compiler {
             subst: Substitution::new(seed, substitution_enabled),
             value_cryptor: ValueCryptor::new(seed),
             value_cryptor_enabled: mba_enabled,
+            // Opaque predicates enabled for standard+ protection (when substitution is on)
+            opaque_predicates_enabled: substitution_enabled,
         }
     }
 

@@ -51,7 +51,7 @@
 //! - `(x | 1) != 0` → always true
 //! - `(x ^ x) == 0` → always true
 
-use crate::opcodes::{stack, arithmetic, control};
+use crate::opcodes::{stack, arithmetic, control, special};
 
 /// Substitution state - handles RNG and decision making
 pub struct Substitution {
@@ -954,17 +954,59 @@ impl ControlFlowSubstitution {
     }
 
     /// Insert a fake conditional that always falls through
-    /// Useful for confusing static analysis
+    /// Stack-neutral AND flag-neutral: doesn't affect stack or flags
+    /// NOTE: This VM uses flag-based jumps (JZ/JNZ check zero_flag)
+    /// Only uses PUSH, DROP, DUP, SWAP, NOP which don't modify flags
     pub fn emit_fake_conditional<F: Fn(u8) -> u8>(subst: &mut Substitution, bytecode: &mut Vec<u8>, encode: &F) {
-        // Push opaque true, then JZ (which never jumps because value is true/1)
-        OpaquePredicate::emit_always_true(subst, bytecode, encode);
-        bytecode.push(encode(control::JNZ)); // Jump over the fake "dead" code
-        // Offset: skip the next few bytes (fake dead code)
-        bytecode.push(2); // Skip 2 bytes (little endian i16)
-        bytecode.push(0);
-        // "Dead" code that's never reached but confuses analysis:
-        bytecode.push(encode(stack::PUSH_IMM8));
-        bytecode.push(0xFF);
+        // Choose a random obfuscation pattern (all stack-neutral AND flag-neutral)
+        match subst.next_rand() % 5 {
+            0 => {
+                // Pattern 1: PUSH x, DROP
+                let x = (subst.next_rand() % 256) as u8;
+                bytecode.push(encode(stack::PUSH_IMM8));
+                bytecode.push(x);
+                bytecode.push(encode(stack::DROP));
+            }
+            1 => {
+                // Pattern 2: PUSH x, PUSH y, DROP, DROP
+                let x = (subst.next_rand() % 256) as u8;
+                let y = (subst.next_rand() % 256) as u8;
+                bytecode.push(encode(stack::PUSH_IMM8));
+                bytecode.push(x);
+                bytecode.push(encode(stack::PUSH_IMM8));
+                bytecode.push(y);
+                bytecode.push(encode(stack::DROP));
+                bytecode.push(encode(stack::DROP));
+            }
+            2 => {
+                // Pattern 3: PUSH x, DUP, DROP, DROP
+                let x = (subst.next_rand() % 256) as u8;
+                bytecode.push(encode(stack::PUSH_IMM8));
+                bytecode.push(x);
+                bytecode.push(encode(stack::DUP));
+                bytecode.push(encode(stack::DROP));
+                bytecode.push(encode(stack::DROP));
+            }
+            3 => {
+                // Pattern 4: PUSH x, PUSH y, SWAP, DROP, DROP
+                let x = (subst.next_rand() % 256) as u8;
+                let y = (subst.next_rand() % 256) as u8;
+                bytecode.push(encode(stack::PUSH_IMM8));
+                bytecode.push(x);
+                bytecode.push(encode(stack::PUSH_IMM8));
+                bytecode.push(y);
+                bytecode.push(encode(stack::SWAP));
+                bytecode.push(encode(stack::DROP));
+                bytecode.push(encode(stack::DROP));
+            }
+            _ => {
+                // Pattern 5: Multiple NOPs (simplest)
+                let nop_count = (subst.next_rand() % 3) as usize + 1;
+                for _ in 0..nop_count {
+                    bytecode.push(encode(special::NOP));
+                }
+            }
+        }
     }
 }
 
