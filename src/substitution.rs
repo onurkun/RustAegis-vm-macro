@@ -504,7 +504,7 @@ impl MulSubstitution {
         }
         match multiplier {
             2 => {
-                if subst.next_rand() % 2 == 0 {
+                if subst.next_rand().is_multiple_of(2) {
                     Some(Self::DoubleAdd)
                 } else {
                     Some(Self::DoubleShift)

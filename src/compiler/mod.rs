@@ -229,8 +229,7 @@ impl Compiler {
         let seed = crate::crypto::get_opcode_table().get_seed();
 
         // Start with one global scope
-        let mut scopes = Vec::new();
-        scopes.push(BTreeMap::new());
+        let scopes = vec![BTreeMap::new()];
 
         Self {
             bytecode: Vec::new(),

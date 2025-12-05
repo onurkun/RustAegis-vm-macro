@@ -90,6 +90,7 @@ pub fn generate_tables(key: &[u8; 16], seed: &[u8]) -> WhiteboxTables {
 
 /// Generate lightweight whitebox tables (T-boxes only)
 #[allow(dead_code)] // Reserved for whitebox_lite feature
+#[allow(clippy::needless_range_loop)]
 pub fn generate_tables_lite(key: &[u8; 16], seed: &[u8]) -> WhiteboxTablesLite {
     let mut tables = WhiteboxTablesLite::new();
     let mut rng = SeededRng::new(seed);
@@ -182,7 +183,7 @@ fn generate_encodings(rng: &mut SeededRng) -> InternalEncodings {
 fn generate_mixing_bijections(rng: &mut SeededRng) -> [MixingBijection32; 9] {
     let mut mbs: [MixingBijection32; 9] = core::array::from_fn(|_| MixingBijection32::default());
 
-    for round in 0..9 {
+    for mb in &mut mbs {
         // Generate random invertible 32x32 binary matrix
         // For simplicity, we use a variant with known structure
         let mut matrix = [[0u8; 32]; 32];
@@ -204,13 +205,13 @@ fn generate_mixing_bijections(rng: &mut SeededRng) -> [MixingBijection32; 9] {
                     matrix[i][k] ^= matrix[j][k];
                 }
                 // Inverse: add column i to column j
-                for k in 0..32 {
-                    inverse[k][j] ^= inverse[k][i];
+                for inv_row in &mut inverse {
+                    inv_row[j] ^= inv_row[i];
                 }
             }
         }
 
-        mbs[round] = MixingBijection32 { matrix, inverse };
+        *mb = MixingBijection32 { matrix, inverse };
     }
 
     mbs
@@ -298,6 +299,7 @@ fn generate_xor_tables(encodings: &InternalEncodings, tables: &mut WhiteboxTable
 }
 
 /// Generate MBL tables (inverse mixing bijection × L encoding)
+#[allow(clippy::needless_range_loop)]
 fn generate_mbl_tables(
     mixing_bijections: &[MixingBijection32; 9],
     encodings: &InternalEncodings,
@@ -344,8 +346,7 @@ fn generate_last_round_tboxes(
 ) {
     let round = AES_ROUNDS - 1; // Round 9
 
-    for pos in 0..AES_BLOCK_SIZE {
-        let shifted_pos = SHIFT_ROWS[pos];
+    for (pos, &shifted_pos) in SHIFT_ROWS.iter().enumerate().take(AES_BLOCK_SIZE) {
 
         for x in 0..256 {
             // Decode from round 8 output encoding

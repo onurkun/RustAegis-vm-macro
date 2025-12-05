@@ -22,7 +22,7 @@ use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use syn::{
     visit_mut::{self, VisitMut},
-    Expr, ExprLit, Lit, LitStr,
+    Expr, ExprLit, Lit,
 };
 
 use crate::crypto::get_build_seed;

@@ -531,8 +531,9 @@ pub fn obfuscate_strings(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - Different key every build
 /// - No plaintext in binary
 /// - Decrypted on first access, cached thereafter
-/// Internal version for use within aegis_vm crate
-/// Uses `crate::` path instead of `aegis_vm::`
+///
+/// Internal version for use within aegis_vm crate.
+/// Uses `crate::` path instead of `aegis_vm::`.
 #[proc_macro]
 pub fn aegis_str_internal(input: TokenStream) -> TokenStream {
     let lit_str = parse_macro_input!(input as syn::LitStr);

@@ -417,11 +417,7 @@ impl Compiler {
             }
             Expr::Tuple(tuple) => {
                 // Infer type from literal element
-                if let Some(elem) = tuple.elems.iter().nth(index) {
-                    Some(self.infer_type_from_expr(elem).0)
-                } else {
-                    None
-                }
+                tuple.elems.iter().nth(index).map(|elem| self.infer_type_from_expr(elem).0)
             }
             Expr::Paren(paren) => self.get_tuple_element_type_for_inference(&paren.expr, index),
             Expr::Field(field) => {
