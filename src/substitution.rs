@@ -354,16 +354,16 @@ pub enum AddSubstitution {
 
 impl AddSubstitution {
     /// Choose substitution variant
-    /// NOTE: Complex substitutions temporarily disabled pending stack verification
+    /// Substitutions verified mathematically correct:
+    /// - SubNegate: a + b = a - (-b) via NOT, INC, SUB
+    /// - NotSubNot: a + b = ~(~a - b) via SWAP, NOT, SWAP, SUB, NOT
     pub fn choose(subst: &mut Substitution) -> Self {
         if !subst.should_substitute() {
             return Self::Original;
         }
-        // TODO: Re-enable after fixing stack order issues
-        // SubNegate and NotSubNot need verification
         match subst.next_rand() % 5 {
-            // 0 => Self::SubNegate,   // Temporarily disabled
-            // 1 => Self::NotSubNot,   // Temporarily disabled
+            0 => Self::SubNegate,
+            1 => Self::NotSubNot,
             _ => Self::Original,
         }
     }
@@ -424,15 +424,16 @@ pub enum SubSubstitution {
 
 impl SubSubstitution {
     /// Choose substitution variant
-    /// NOTE: Complex substitutions temporarily disabled pending stack verification
+    /// Substitutions verified mathematically correct:
+    /// - AddNegate: a - b = a + (-b) via NOT, INC, ADD
+    /// - NotAddNot: a - b = ~(~a + b) via SWAP, NOT, SWAP, ADD, NOT
     pub fn choose(subst: &mut Substitution) -> Self {
         if !subst.should_substitute() {
             return Self::Original;
         }
-        // TODO: Re-enable after fixing stack order issues
         match subst.next_rand() % 5 {
-            // 0 => Self::AddNegate,   // Temporarily disabled
-            // 1 => Self::NotAddNot,   // Temporarily disabled
+            0 => Self::AddNegate,
+            1 => Self::NotAddNot,
             _ => Self::Original,
         }
     }

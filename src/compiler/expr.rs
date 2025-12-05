@@ -53,6 +53,47 @@ impl Compiler {
                             return Err(CompileError(format!("Unknown variable: {}", name)));
                         }
                     }
+                } else if path.path.segments.len() == 2 {
+                    // Handle type constants like u64::MAX, i64::MIN, etc.
+                    let type_name = path.path.segments[0].ident.to_string();
+                    let const_name = path.path.segments[1].ident.to_string();
+
+                    let value = match (type_name.as_str(), const_name.as_str()) {
+                        // Unsigned MAX values
+                        ("u8", "MAX") => u8::MAX as u64,
+                        ("u16", "MAX") => u16::MAX as u64,
+                        ("u32", "MAX") => u32::MAX as u64,
+                        ("u64", "MAX") => u64::MAX,
+                        ("usize", "MAX") => usize::MAX as u64,
+                        // Unsigned MIN values (all 0)
+                        ("u8", "MIN") | ("u16", "MIN") | ("u32", "MIN") |
+                        ("u64", "MIN") | ("usize", "MIN") => 0,
+                        // Signed MAX values
+                        ("i8", "MAX") => i8::MAX as u64,
+                        ("i16", "MAX") => i16::MAX as u64,
+                        ("i32", "MAX") => i32::MAX as u64,
+                        ("i64", "MAX") => i64::MAX as u64,
+                        ("isize", "MAX") => isize::MAX as u64,
+                        // Signed MIN values (as two's complement)
+                        ("i8", "MIN") => i8::MIN as i64 as u64,
+                        ("i16", "MIN") => i16::MIN as i64 as u64,
+                        ("i32", "MIN") => i32::MIN as i64 as u64,
+                        ("i64", "MIN") => i64::MIN as u64,
+                        ("isize", "MIN") => isize::MIN as i64 as u64,
+                        // BITS constants
+                        ("u8", "BITS") | ("i8", "BITS") => 8,
+                        ("u16", "BITS") | ("i16", "BITS") => 16,
+                        ("u32", "BITS") | ("i32", "BITS") => 32,
+                        ("u64", "BITS") | ("i64", "BITS") => 64,
+                        ("usize", "BITS") | ("isize", "BITS") => std::mem::size_of::<usize>() as u64 * 8,
+                        _ => {
+                            return Err(CompileError(format!(
+                                "Unsupported type constant: {}::{}", type_name, const_name
+                            )));
+                        }
+                    };
+
+                    self.emit_constant(value);
                 } else {
                     return Err(CompileError("Complex paths not supported".to_string()));
                 }
