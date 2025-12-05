@@ -26,6 +26,7 @@ mod opcodes;
 mod polymorphic;
 mod substitution;
 mod value_cryptor;
+mod whitebox;
 
 /// Protection level for VM-protected functions
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

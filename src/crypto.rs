@@ -220,9 +220,14 @@ pub struct EncryptedPackage {
 }
 
 /// Encrypt bytecode with build seed
+/// Uses WBC-derived key for maximum key-hiding protection
 pub fn encrypt_with_seed(bytecode: &[u8], function_id: u64) -> Result<EncryptedPackage, String> {
     let seed = get_build_seed();
-    let key = derive_key(&seed, b"bytecode-encryption");
+
+    // Use WBC to derive the encryption key (key-hiding)
+    let key = crate::whitebox::derive_bytecode_key(&seed);
+
+    // Nonce is still HMAC-derived (no need to hide nonce)
     let nonce = derive_nonce(&seed, function_id);
     let build_id = derive_build_id(&seed);
 
