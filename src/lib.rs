@@ -244,7 +244,7 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                     // Native call support: function table
                     #native_table
 
-                    let input_buffer: Vec<u8> = { #input_prep };
+                    let input_buffer: aegis_vm::StdVec<u8> = { #input_prep };
 
                     let result = aegis_vm::execute_with_native_table(&BYTECODE, &input_buffer, &__native_table)
                         .expect("VM execution failed");
@@ -327,7 +327,7 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                     // Decryption helper - inlined to avoid static caching issues in no_std
                     #[inline(always)]
-                    fn __aegis_decrypt() -> aegis_vm::VmResult<Vec<u8>> {
+                    fn __aegis_decrypt() -> aegis_vm::VmResult<aegis_vm::StdVec<u8>> {
                         // Verify build ID matches (E01 = build mismatch)
                         let runtime_build_id = aegis_vm::build_config::BUILD_ID;
                         if BUILD_ID != runtime_build_id {
@@ -349,44 +349,20 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                         Ok(decrypted)
                     }
 
-                    // For std environments: cache the decrypted bytecode
-                    #[cfg(feature = "std")]
+                    // Cache decrypted bytecode using aegis_vm re-exports (works for both std and no_std)
                     {
-                        use std::sync::OnceLock;
-                        static DECRYPTED: OnceLock<Vec<u8>> = OnceLock::new();
+                        static DECRYPTED: aegis_vm::SpinOnce<aegis_vm::StdVec<u8>> = aegis_vm::SpinOnce::new();
 
-                        let bytecode = DECRYPTED.get_or_init(|| {
+                        let bytecode = DECRYPTED.call_once(|| {
                             __aegis_decrypt().expect("E02")
                         });
 
                         #region_check
 
-                        let input_buffer: Vec<u8> = { #input_prep };
+                        let input_buffer: aegis_vm::StdVec<u8> = { #input_prep };
 
                         let result = aegis_vm::execute_with_native_table(bytecode, &input_buffer, &__native_table)
                             .expect("E04");
-
-                        #output_extract
-                    }
-
-                    // For no_std environments: use spin::Once for caching
-                    #[cfg(not(feature = "std"))]
-                    {
-                        extern crate alloc;
-                        use alloc::vec::Vec;
-                        use spin::Once;
-                        static DECRYPTED: Once<Vec<u8>> = Once::new();
-
-                        let bytecode = DECRYPTED.call_once(|| {
-                            __aegis_decrypt().unwrap_or_else(|_| loop {})
-                        });
-
-                        #region_check
-
-                        let input_buffer: Vec<u8> = { #input_prep };
-
-                        let result = aegis_vm::execute_with_native_table(bytecode, &input_buffer, &__native_table)
-                            .unwrap_or_else(|_| loop {});
 
                         #output_extract
                     }
@@ -431,10 +407,14 @@ fn generate_input_prep(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::C
     let buffer_size = num_args * 8;
 
     if num_args == 0 {
-        quote! { Vec::new() }
+        quote! { aegis_vm::StdVec::new() }
     } else {
         quote! {
-            let mut buf = vec![0u8; #buffer_size];
+            let mut buf = {
+                let mut v = aegis_vm::StdVec::with_capacity(#buffer_size);
+                v.resize(#buffer_size, 0u8);
+                v
+            };
             #(#prep_code)*
             buf
         }
