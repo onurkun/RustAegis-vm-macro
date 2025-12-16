@@ -349,13 +349,12 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                         Ok(decrypted)
                     }
 
-                    // For std environments: cache the decrypted bytecode
-                    #[cfg(feature = "std")]
+                    // Cache decrypted bytecode using spin::Once (works for both std and no_std)
                     {
-                        use std::sync::OnceLock;
-                        static DECRYPTED: OnceLock<Vec<u8>> = OnceLock::new();
+                        use spin::Once;
+                        static DECRYPTED: Once<Vec<u8>> = Once::new();
 
-                        let bytecode = DECRYPTED.get_or_init(|| {
+                        let bytecode = DECRYPTED.call_once(|| {
                             __aegis_decrypt().expect("E02")
                         });
 
@@ -365,28 +364,6 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                         let result = aegis_vm::execute_with_native_table(bytecode, &input_buffer, &__native_table)
                             .expect("E04");
-
-                        #output_extract
-                    }
-
-                    // For no_std environments: use spin::Once for caching
-                    #[cfg(not(feature = "std"))]
-                    {
-                        extern crate alloc;
-                        use alloc::vec::Vec;
-                        use spin::Once;
-                        static DECRYPTED: Once<Vec<u8>> = Once::new();
-
-                        let bytecode = DECRYPTED.call_once(|| {
-                            __aegis_decrypt().unwrap_or_else(|_| loop {})
-                        });
-
-                        #region_check
-
-                        let input_buffer: Vec<u8> = { #input_prep };
-
-                        let result = aegis_vm::execute_with_native_table(bytecode, &input_buffer, &__native_table)
-                            .unwrap_or_else(|_| loop {});
 
                         #output_extract
                     }

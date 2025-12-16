@@ -1,6 +1,6 @@
 [package]
 name = "aegis_vm_macro"
-version = "0.2.2"
+version = "0.2.5"
 edition = "2021"
 description = "Proc-macro for VM-protected functions - RustAegis"
 license = "MIT"
@@ -23,5 +23,3 @@ hex = "0.4"
 
 [features]
 default = []
-# Generate no_std compatible code (uses spin::Once instead of std::sync::OnceLock)
-no_std = []
