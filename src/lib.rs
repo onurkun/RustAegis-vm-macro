@@ -349,16 +349,9 @@ pub fn vm_protect(attr: TokenStream, item: TokenStream) -> TokenStream {
                         Ok(decrypted)
                     }
 
-<<<<<<< HEAD
                     // Cache decrypted bytecode using aegis_vm re-exports (works for both std and no_std)
                     {
                         static DECRYPTED: aegis_vm::SpinOnce<aegis_vm::StdVec<u8>> = aegis_vm::SpinOnce::new();
-=======
-                    // Cache decrypted bytecode using spin::Once (works for both std and no_std)
-                    {
-                        use spin::Once;
-                        static DECRYPTED: Once<Vec<u8>> = Once::new();
->>>>>>> 576cd83cd60a841ddb2a84a61da138e014c27225
 
                         let bytecode = DECRYPTED.call_once(|| {
                             __aegis_decrypt().expect("E02")
